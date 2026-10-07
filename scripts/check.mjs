@@ -188,11 +188,28 @@ function runStep(step, logDir) {
     let output = '';
     let timedOut = false;
     let settled = false;
-    let timer = null;
+    // Every timer this step schedules; all are cleared when the step settles so a
+    // late timer can never act on (or clear currentKill for) the next step.
+    const timers = new Set();
+    const later = (fn, ms) => {
+      const t = setTimeout(() => {
+        timers.delete(t);
+        fn();
+      }, ms);
+      timers.add(t);
+      return t;
+    };
+    // Kill function owned by this step; currentKill is only cleared while it is still ours.
+    let myKill = null;
+    const releaseKill = () => {
+      if (myKill !== null && currentKill === myKill) currentKill = null;
+    };
     const finish = (status, exitCode, extra = '') => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      for (const t of timers) clearTimeout(t);
+      timers.clear();
+      releaseKill();
       if (extra) output += `${output.endsWith('\n') || output === '' ? '' : '\n'}${extra}\n`;
       writeFileSync(join(logDir, `${step.name}.log`), `$ ${command}\n${output}`);
       resolveStep({
@@ -240,14 +257,17 @@ function runStep(step, logDir) {
         // already gone
       }
     };
-    currentKill = () => killTree('SIGKILL');
+    myKill = () => killTree('SIGKILL');
+    currentKill = myKill;
 
     // Resolve on 'exit', not 'close': a grandchild that escaped the process group
     // (setsid) can hold the pipes open forever. Give output DRAIN_MS to arrive,
     // then destroy the pipes and settle.
     let exitInfo = null;
+    // Idempotent: runs from the 'close' event, the post-exit drain timer or the
+    // hard-stop timer, whichever comes first; later calls are no-ops.
     const settleAfterExit = () => {
-      currentKill = null;
+      if (settled) return;
       child.stdout.destroy();
       child.stderr.destroy();
       const { code, signal } = exitInfo ?? { code: null, signal: null };
@@ -260,23 +280,22 @@ function runStep(step, logDir) {
       }
     };
 
-    timer = setTimeout(() => {
+    later(() => {
       timedOut = true;
       killTree('SIGTERM');
-      setTimeout(() => killTree('SIGKILL'), KILL_GRACE_MS).unref();
+      later(() => killTree('SIGKILL'), KILL_GRACE_MS).unref();
       // Hard stop even if the direct child somehow never reports exit.
-      setTimeout(settleAfterExit, KILL_GRACE_MS + DRAIN_MS + 1_000).unref();
+      later(settleAfterExit, KILL_GRACE_MS + DRAIN_MS + 1_000).unref();
     }, step.timeoutMs);
 
     child.on('error', (err) => {
-      currentKill = null;
       finish('error', null, `check: failed to start ${command}: ${err.message}`);
     });
     child.on('exit', (code, signal) => {
       exitInfo = { code, signal };
       // Reap anything the step left behind in its own process group.
       killTree('SIGKILL');
-      setTimeout(settleAfterExit, DRAIN_MS).unref();
+      if (!settled) later(settleAfterExit, DRAIN_MS).unref();
     });
     child.on('close', () => {
       if (exitInfo) settleAfterExit();

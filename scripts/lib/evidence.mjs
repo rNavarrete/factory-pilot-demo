@@ -9,12 +9,17 @@ const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
 
 /**
  * @param {unknown} evidence parsed evidence JSON
- * @param {{ expectCommit: string, expectCheckRevision?: object, allowControlChange?: boolean }} expectations
+ * @param {{ expectCommit: string, expectCheckRevision?: object, expectContractDigest?: string, allowControlChange?: boolean }} expectations
  * @returns {{ verified: boolean, reasons: string[] }}
  */
 export function verifyEvidence(evidence, expectations = {}) {
   const reasons = [];
-  const { expectCommit, expectCheckRevision, allowControlChange = false } = expectations ?? {};
+  const {
+    expectCommit,
+    expectCheckRevision,
+    expectContractDigest,
+    allowControlChange = false,
+  } = expectations ?? {};
 
   if (!isObject(evidence)) {
     return { verified: false, reasons: ['evidence is not a JSON object'] };
@@ -77,6 +82,22 @@ export function verifyEvidence(evidence, expectations = {}) {
           );
         }
       }
+    }
+  }
+
+  // Contract binding: only when the caller supplies a trusted digest (from the
+  // controller's approval record, never from the candidate). Without it, unchanged.
+  if (expectContractDigest !== undefined && expectContractDigest !== null) {
+    const want = typeof expectContractDigest === 'string' ? expectContractDigest.trim().toLowerCase() : '';
+    const got = evidence.contractDigest;
+    if (want === '') {
+      reasons.push('expected contract digest is empty or not a string');
+    } else if (typeof got !== 'string' || got.trim() === '') {
+      reasons.push(
+        `contractDigest is ${got === undefined ? 'missing' : JSON.stringify(got)}, expected ${want}`,
+      );
+    } else if (got.trim().toLowerCase() !== want) {
+      reasons.push(`contractDigest ${got} does not match expected ${want}`);
     }
   }
 

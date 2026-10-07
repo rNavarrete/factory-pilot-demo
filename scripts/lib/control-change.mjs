@@ -5,7 +5,9 @@
 // plain content under the allowlist below. Even inside the allowlist,
 // config-looking files (dotfiles, CODEOWNERS, package.json, tsconfig*.json,
 // *.config.*, vitest.workspace*) are control changes. Test-weakening edits and
-// added lint/type suppressions are flagged anywhere. Detective only: it never
+// added lint/type suppressions are flagged anywhere. Test files are judged
+// conservatively: any rename of a test-like file, any test-like file outside the
+// vitest include, and any removed or modified non-blank test line is flagged. Detective only: it never
 // blocks, it flags the change for Rolando's explicit review.
 //
 // The same predicate (isControlPath) decides which files feed the check's
@@ -72,9 +74,19 @@ export function isControlPath(path) {
   return controlPathReason(path) !== null;
 }
 
+// Test-like: anything under tests/ or named *.test.* / *.spec.*. Deliberately
+// broader than what vitest runs, so edits to any test-looking file are scrutinized.
+const TEST_NAME_RE = /\.(test|spec)\.[cm]?[jt]sx?$/;
+
 export function isTestFile(path) {
   const p = normalizePath(path);
-  return p.startsWith('tests/') || /\.(test|spec)\.[cm]?[jt]sx?$/.test(p);
+  return p.startsWith('tests/') || TEST_NAME_RE.test(p);
+}
+
+// What vitest actually collects: vite.config.ts `include: ['tests/**/*.test.ts']`.
+export function isInTestSuite(path) {
+  const p = normalizePath(path);
+  return /^tests\/(?:.+\/)?[^/]+\.test\.ts$/.test(p);
 }
 
 function isDeleted(status) {
@@ -128,10 +140,35 @@ export function classifyDiff(files) {
       reasons.push(`${path}: test file deleted`);
       continue;
     }
-    if (oldPath && testBefore && !testNow && isRenamed(status)) {
-      reasons.push(`${oldPath} -> ${path}: test file moved out of the test suite`);
+    // Conservative: any rename touching a test-like file on either side is flagged
+    // (a move can silently take a test out of what vitest collects).
+    if (oldPath && oldPath !== path && (testBefore || testNow)) {
+      reasons.push(
+        testBefore && !isInTestSuite(path)
+          ? `${oldPath} -> ${path}: test file moved out of the test suite`
+          : `${oldPath} -> ${path}: test file renamed${isRenamed(status) ? '' : ' or copied'}`,
+      );
     }
     if (!testNow && !testBefore) continue;
+    // A file named like a test (*.test.* / *.spec.*) that vitest will not collect.
+    // Plain helpers under tests/ (e.g. tests/helpers.ts) are not tests themselves.
+    if (TEST_NAME_RE.test(path) && !isInTestSuite(path)) {
+      reasons.push(
+        `${path}: test file outside the suite will not run (vitest includes only tests/**/*.test.ts)`,
+      );
+    }
+    // Conservative: any removed or modified existing non-blank line in a test file
+    // can weaken it (e.g. expect(add(1, 2)).toBe(3) -> expect(true).toBe(true)).
+    // Pure additions are not flagged.
+    const changedLines = removed.filter((l) => l.trim() !== '');
+    if (changedLines.length > 0) {
+      reasons.push(
+        `${path}: removes or modifies ${changedLines.length} existing test line(s) (${changedLines
+          .slice(0, 3)
+          .map((l) => l.trim())
+          .join(' | ')}${changedLines.length > 3 ? ' | ...' : ''})`,
+      );
+    }
 
     const addedAssertions = added.filter((l) => ASSERTION_RE.test(l)).length;
     const removedAssertions = removed.filter((l) => ASSERTION_RE.test(l)).length;

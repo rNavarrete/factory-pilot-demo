@@ -44,6 +44,11 @@ the commit does not match (stale evidence), or the tree was dirty. The evidence 
 
 Only a clean CI run on the exact candidate commit counts. A local run is useful, but it is not evidence.
 
+CI does not tie the evidence to an approved task. The controller does that: it knows the approved contract digest
+and runs `scripts/verify-evidence.mjs --expect-contract-digest <sha256>`. Verification then fails if the
+evidence's contract digest is missing, `null` or different (the comparison ignores case). Without that flag a
+`null` digest is accepted, so a CI pass on its own says nothing about which task it was for.
+
 ## The job to require
 
 ENG-142's ruleset must require the **`verified`** job. It passes only when both `check` and `check-selftest`
@@ -66,11 +71,14 @@ Inside the allowlist, files that look like config are still flagged: dotfiles (s
 Test and code changes are also flagged when they:
 
 - delete a test file
-- remove more assertions or tests than they add (`expect(`, `expect.soft(`, `assert(`, `it(`, `test(`)
+- change or remove any existing non-blank line in a test file. Only adding lines is safe, so rewriting an
+  assertion is flagged even if the number of `expect(` lines stays the same
+- rename or move a test file (either side of the rename counts)
+- add a test file outside `tests/**/*.test.ts`, such as `src/new.test.ts`, because the suite would never run it
 - add `.skip`, `.only`, `.todo`, `.fails`, `skipIf`, `runIf` or `.concurrent.skip` / `.concurrent.only`
 - add `@ts-nocheck`, `@ts-ignore`, `@ts-expect-error` or `eslint-disable` in any file
 
-Plain edits to source, tests, docs, `README.md` or `index.html` are not flagged.
+Plain edits to source, docs, `README.md` or `index.html`, and new tests added under `tests/`, are not flagged.
 
 On pull requests, the `control-change` job runs the classifier from the base branch, not from the PR, so a PR
 cannot change the rules it is judged by. If the base branch has no classifier yet (true for the first PR that adds
@@ -117,6 +125,6 @@ Measured on a cloud worker (Node 22): `npm run check` about 5 s; full selftest (
   go green. The classifier runs from the base branch, so such a PR is flagged, but the flag does not block merge.
   Human review of flagged PRs is the real control until ENG-142 turns on the ruleset and code-owner review.
 - The classifier works on file paths and diff lines. It can be fooled by a change it does not recognise, for example
-  weakening an assertion while keeping the same number of `expect(` lines.
+  weakening behaviour in `src/` that the tests do not cover.
 - The check revision hash shows what ran, but nothing compares it to a trusted baseline in CI yet.
   `verify-evidence.mjs --expect-check-revision` supports that when a baseline is stored outside the PR.

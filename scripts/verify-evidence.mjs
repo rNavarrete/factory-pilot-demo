@@ -2,7 +2,11 @@
 // Verify check evidence for an exact candidate commit (ENG-140, G-B2).
 //
 //   node scripts/verify-evidence.mjs <evidence.json> --expect-commit <sha>
-//        [--expect-check-revision <file with trusted checkRevision json>] [--allow-control-change]
+//        [--expect-check-revision <file with trusted checkRevision json>]
+//        [--expect-contract-digest <hex>] [--allow-control-change]
+//
+// --expect-contract-digest binds the evidence to an approved task contract: the
+// trusted digest comes from the controller's approval record, never from the PR.
 //
 // Exit 0 only when verified. Skipped, neutral, missing, stale or dirty evidence is rejected.
 
@@ -19,7 +23,7 @@ function usage(message) {
   console.error(`verify-evidence: ${message}`);
   console.error(
     'usage: node scripts/verify-evidence.mjs <evidence.json> --expect-commit <sha> ' +
-      '[--expect-check-revision <file>] [--allow-control-change]',
+      '[--expect-check-revision <file>] [--expect-contract-digest <hex>] [--allow-control-change]',
   );
   process.exit(1);
 }
@@ -28,6 +32,7 @@ const argv = process.argv.slice(2);
 let file = null;
 let expectCommit = null;
 let revisionFile = null;
+let expectContractDigest = null;
 let allowControlChange = false;
 for (let i = 0; i < argv.length; i++) {
   const arg = argv[i];
@@ -38,6 +43,7 @@ for (let i = 0; i < argv.length; i++) {
   };
   if (arg === '--expect-commit') expectCommit = next();
   else if (arg === '--expect-check-revision') revisionFile = next();
+  else if (arg === '--expect-contract-digest') expectContractDigest = next();
   else if (arg === '--allow-control-change') allowControlChange = true;
   else if (arg.startsWith('--')) usage(`unknown flag ${arg}`);
   else if (file === null) file = arg;
@@ -62,6 +68,7 @@ function readJson(path, what) {
 
 const evidence = readJson(file, 'evidence file');
 const expectations = { expectCommit, allowControlChange };
+if (expectContractDigest !== null) expectations.expectContractDigest = expectContractDigest;
 if (revisionFile) {
   const trusted = readJson(revisionFile, 'trusted checkRevision file');
   // Accept either a bare checkRevision object or a whole evidence file.

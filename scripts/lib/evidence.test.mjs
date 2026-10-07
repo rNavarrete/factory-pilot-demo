@@ -193,3 +193,43 @@ for (const field of ['checkVersion', 'checkScriptSha256', 'workflowSha256', 'con
 test('rejects an empty trusted baseline', () => {
   expectRejected(goodEvidence(), { expectCommit: COMMIT, expectCheckRevision: {} });
 });
+
+// Contract digest binding (--expect-contract-digest).
+const DIGEST = 'c'.repeat(64);
+
+test('matching contract digest is verified', () => {
+  const result = verifyEvidence(goodEvidence(), { expectCommit: COMMIT, expectContractDigest: DIGEST });
+  assert.equal(result.verified, true, JSON.stringify(result.reasons));
+});
+
+test('contract digest comparison is case-insensitive', () => {
+  const e = goodEvidence();
+  e.contractDigest = 'C'.repeat(64);
+  const result = verifyEvidence(e, { expectCommit: COMMIT, expectContractDigest: DIGEST });
+  assert.equal(result.verified, true, JSON.stringify(result.reasons));
+  const result2 = verifyEvidence(goodEvidence(), {
+    expectCommit: COMMIT,
+    expectContractDigest: DIGEST.toUpperCase(),
+  });
+  assert.equal(result2.verified, true, JSON.stringify(result2.reasons));
+});
+
+test('rejects a mismatched contract digest', () => {
+  expectRejected(goodEvidence(), { expectCommit: COMMIT, expectContractDigest: 'd'.repeat(64) }, /contract/i);
+});
+
+test('rejects a null or missing contract digest when one is expected', () => {
+  const nullDigest = goodEvidence();
+  nullDigest.contractDigest = null;
+  expectRejected(nullDigest, { expectCommit: COMMIT, expectContractDigest: DIGEST }, /contract/i);
+  const missing = goodEvidence();
+  delete missing.contractDigest;
+  expectRejected(missing, { expectCommit: COMMIT, expectContractDigest: DIGEST }, /contract/i);
+});
+
+test('without expectContractDigest a null contract digest still passes', () => {
+  const e = goodEvidence();
+  e.contractDigest = null;
+  const result = verifyEvidence(e, { expectCommit: COMMIT });
+  assert.equal(result.verified, true, JSON.stringify(result.reasons));
+});

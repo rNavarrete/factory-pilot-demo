@@ -128,8 +128,8 @@ test('adding a new assertion to a test file is not flagged', () => {
   ]);
 });
 
-test('rewriting an assertion one-for-one is not flagged', () => {
-  assertNotFlagged([
+test('rewriting an assertion one-for-one is flagged (any edit of an existing test line counts)', () => {
+  assertFlagged([
     {
       path: 'tests/books.test.ts',
       status: 'modified',
@@ -238,5 +238,89 @@ for (const directive of [
 test('removing a suppression directive is not flagged', () => {
   assertNotFlagged([
     { path: 'src/books.ts', status: 'modified', patch: '@@\n-// @ts-ignore\n const a = 1;\n' },
+  ]);
+});
+
+// Renames and placement of test files.
+test('renaming a test file from tests/ into src/ is flagged', () => {
+  assertFlagged(
+    [{ path: 'src/books.test.ts', oldPath: 'tests/books.test.ts', status: 'renamed' }],
+    /test|rename|move/i,
+  );
+});
+
+test('renaming a test file from src/ into tests/ is flagged', () => {
+  assertFlagged(
+    [{ path: 'tests/x.test.ts', oldPath: 'src/x.test.ts', status: 'renamed' }],
+    /test|rename|move/i,
+  );
+});
+
+test('adding a test file outside tests/**/*.test.ts is flagged (it would not run in the suite)', () => {
+  assertFlagged(
+    [
+      {
+        path: 'src/new.test.ts',
+        status: 'added',
+        patch: "@@\n+it('works', () => {\n+  expect(1).toBe(1);\n+});\n",
+      },
+    ],
+    /test|suite|outside/i,
+  );
+});
+
+test('adding a nested test file under tests/ is not flagged', () => {
+  assertNotFlagged([
+    {
+      path: 'tests/sub/new.test.ts',
+      status: 'added',
+      patch: "@@\n+it('works', () => {\n+  expect(1).toBe(1);\n+});\n",
+    },
+  ]);
+});
+
+// Any edit or removal of an existing test line is flagged.
+test('replacing a real assertion with a trivially true one is flagged', () => {
+  assertFlagged(
+    [
+      {
+        path: 'tests/books.test.ts',
+        status: 'modified',
+        patch:
+          "@@ -1,3 +1,3 @@\n it('adds', () => {\n-  expect(add(1, 2)).toBe(3);\n+  expect(true).toBe(true);\n });\n",
+      },
+    ],
+    /tests\/books\.test\.ts/,
+  );
+});
+
+test('changing a non-assertion line in a test file is flagged', () => {
+  assertFlagged([
+    {
+      path: 'tests/books.test.ts',
+      status: 'modified',
+      patch: '@@\n-  const input = [1, 2, 3];\n+  const input = [];\n',
+    },
+  ]);
+});
+
+test('only adding lines to tests/books.test.ts is not flagged', () => {
+  assertNotFlagged([
+    {
+      path: 'tests/books.test.ts',
+      status: 'modified',
+      patch:
+        "@@ -10,3 +10,8 @@\n });\n+\n+it('new case', () => {\n+  const x = 1;\n+  expect(x).toBe(1);\n+});\n",
+    },
+  ]);
+});
+
+test('removing only a blank line from a test file is not flagged', () => {
+  assertNotFlagged([
+    {
+      path: 'tests/books.test.ts',
+      status: 'modified',
+      patch: "@@ -1,4 +1,3 @@\n it('a', () => {});\n-\n it('b', () => {});\n",
+    },
   ]);
 });
