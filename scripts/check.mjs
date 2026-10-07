@@ -15,26 +15,32 @@
 
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isControlPath } from './lib/control-change.mjs';
 
 const CHECK_VERSION = '1';
 const SCHEMA_VERSION = 1;
 const LOG_TAIL_LINES = 200;
+const DRAIN_MS = 2_000; // wait for output after a step exits before destroying its pipes
+const KILL_GRACE_MS = 5_000; // SIGTERM -> SIGKILL on timeout
+
+// Kills the running step's process group; set while a step runs.
+let currentKill = null;
+
+// Environment for steps: NODE_OPTIONS can inject code (--require/--import) into
+// every tool, so it is never passed through.
+const CLEARED_ENV = ['NODE_OPTIONS', 'npm_config_node_options', 'NPM_CONFIG_NODE_OPTIONS'];
+function childEnv() {
+  const env = { ...process.env, FORCE_COLOR: '0', NO_COLOR: '1' };
+  for (const k of CLEARED_ENV) delete env[k];
+  return env;
+}
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const WORKFLOW_PATH = join(ROOT, '.github', 'workflows', 'ci.yml');
-const CONFIG_FILES = [
-  'package.json',
-  'package-lock.json',
-  'eslint.config.js',
-  '.prettierrc.json',
-  'tsconfig.json',
-  'vite.config.ts',
-  '.nvmrc',
-];
 
 // Fixed step list and timeouts. Order matters only for display.
 const STEPS = [
@@ -85,9 +91,18 @@ function fileSha256(path) {
   return existsSync(path) ? sha256(readFileSync(path)) : null;
 }
 
+// Hash of every tracked file that is NOT plain allowlisted content: the same
+// predicate control-change uses ("would be flagged if changed"). Covers scripts,
+// workflows, package files, all config and dotfiles, CLAUDE.md, etc.
 function configSha256() {
+  const r = spawnSync('git', ['ls-files', '-z'], { cwd: ROOT, encoding: 'utf8' });
+  if (r.status !== 0) return null;
+  const names = r.stdout
+    .split('\0')
+    .filter((n) => n !== '' && isControlPath(n))
+    .sort();
   const h = createHash('sha256');
-  for (const name of [...CONFIG_FILES].sort()) {
+  for (const name of names) {
     const p = join(ROOT, name);
     h.update(`${name}\0`);
     h.update(existsSync(p) ? readFileSync(p) : '<missing>');
@@ -132,6 +147,7 @@ function environment() {
     arch: process.arch,
     ci: process.env.CI === 'true' || process.env.GITHUB_ACTIONS === 'true',
     runner: runner(),
+    nodeOptionsCleared: true,
   };
 }
 
@@ -206,7 +222,7 @@ function runStep(step, logDir) {
 
     const child = spawn(binPath, step.args, {
       cwd: ROOT,
-      env: { ...process.env, FORCE_COLOR: '0', NO_COLOR: '1' },
+      env: childEnv(),
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: process.platform !== 'win32',
     });
@@ -224,14 +240,17 @@ function runStep(step, logDir) {
         // already gone
       }
     };
-    timer = setTimeout(() => {
-      timedOut = true;
-      killTree('SIGTERM');
-      setTimeout(() => killTree('SIGKILL'), 5_000).unref();
-    }, step.timeoutMs);
+    currentKill = () => killTree('SIGKILL');
 
-    child.on('error', (err) => finish('error', null, `check: failed to start ${command}: ${err.message}`));
-    child.on('close', (code, signal) => {
+    // Resolve on 'exit', not 'close': a grandchild that escaped the process group
+    // (setsid) can hold the pipes open forever. Give output DRAIN_MS to arrive,
+    // then destroy the pipes and settle.
+    let exitInfo = null;
+    const settleAfterExit = () => {
+      currentKill = null;
+      child.stdout.destroy();
+      child.stderr.destroy();
+      const { code, signal } = exitInfo ?? { code: null, signal: null };
       if (timedOut) {
         finish('timeout', code, `check: ${step.name} exceeded ${step.timeoutMs}ms and was killed`);
       } else if (code === 0) {
@@ -239,6 +258,28 @@ function runStep(step, logDir) {
       } else {
         finish('fail', code, signal ? `check: ${step.name} terminated by ${signal}` : '');
       }
+    };
+
+    timer = setTimeout(() => {
+      timedOut = true;
+      killTree('SIGTERM');
+      setTimeout(() => killTree('SIGKILL'), KILL_GRACE_MS).unref();
+      // Hard stop even if the direct child somehow never reports exit.
+      setTimeout(settleAfterExit, KILL_GRACE_MS + DRAIN_MS + 1_000).unref();
+    }, step.timeoutMs);
+
+    child.on('error', (err) => {
+      currentKill = null;
+      finish('error', null, `check: failed to start ${command}: ${err.message}`);
+    });
+    child.on('exit', (code, signal) => {
+      exitInfo = { code, signal };
+      // Reap anything the step left behind in its own process group.
+      killTree('SIGKILL');
+      setTimeout(settleAfterExit, DRAIN_MS).unref();
+    });
+    child.on('close', () => {
+      if (exitInfo) settleAfterExit();
     });
   });
 }
@@ -286,6 +327,8 @@ async function main() {
   const outPath = resolve(process.cwd(), opts.out);
   const logDir = join(ROOT, 'check-logs');
   mkdirSync(logDir, { recursive: true });
+  // Never leave an older evidence file behind for an interrupted run to be mistaken for.
+  rmSync(outPath, { force: true });
 
   const startedAt = new Date();
   const cand = candidate();
@@ -337,6 +380,19 @@ async function main() {
   console.log(`logs:       ${logDir}`);
   appendStepSummary(evidence, opts.out);
   process.exitCode = evidence.outcome === 'pass' ? 0 : 1;
+}
+
+// Ctrl-C / runner cancellation: kill the running step's whole process group and
+// exit nonzero. No evidence is written for an interrupted run.
+for (const [signal, code] of [
+  ['SIGINT', 130],
+  ['SIGTERM', 143],
+]) {
+  process.on(signal, () => {
+    console.error(`\ncheck: received ${signal}; stopping the running step`);
+    if (currentKill) currentKill();
+    process.exit(code);
+  });
 }
 
 main().catch((err) => {

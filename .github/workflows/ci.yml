@@ -13,7 +13,8 @@ permissions:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Cancel superseded PR runs only; every push to main keeps its own run.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   check:
@@ -30,13 +31,15 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
-      - run: npm ci
-      - name: npm run check
-        run: npm run check -- --out check-evidence.json
+      # No install scripts: dependencies cannot run code before the check.
+      - run: npm ci --ignore-scripts
+      - name: Check (node scripts/check.mjs, not via npm)
+        env:
+          NODE_OPTIONS: ''
+        run: node scripts/check.mjs --out check-evidence.json
       - name: Verify evidence for the exact candidate commit
-        # Control changes are reported by the control-change job and reviewed by a human;
-        # they do not by themselves fail the evidence here.
-        run: node scripts/verify-evidence.mjs check-evidence.json --expect-commit "$CANDIDATE_SHA" --allow-control-change
+        # Control changes are reported by the control-change job and reviewed by a human.
+        run: node scripts/verify-evidence.mjs check-evidence.json --expect-commit "$CANDIDATE_SHA"
       - name: Upload evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -52,18 +55,50 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # Detective only: never fails. Flags gate/workflow/config/test-assertion changes for Rolando's review.
+    # The classifier comes from the BASE commit (trusted/), so a PR cannot redefine it.
     continue-on-error: true
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout head (candidate)
+        uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
-      - name: Classify diff
-        run: >-
-          node scripts/control-change.mjs
-          --base ${{ github.event.pull_request.base.sha }}
-          --head ${{ github.event.pull_request.head.sha }}
-          --out control-change.json
+          path: head
+      - name: Checkout base (trusted classifier)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Classify diff with the trusted classifier
+        run: |
+          if [ -f trusted/scripts/control-change.mjs ]; then
+            node trusted/scripts/control-change.mjs --repo head --base "$BASE_SHA" --head "$HEAD_SHA" --out control-change.json
+          else
+            echo "::warning title=Control change::no trusted classifier on base branch"
+            node -e '
+              const fs = require("fs");
+              const r = { base: process.env.BASE_SHA, head: process.env.HEAD_SHA, baseCommit: process.env.BASE_SHA,
+                headCommit: process.env.HEAD_SHA, files: [], flagged: true, reasons: ["no trusted classifier on base branch"] };
+              fs.writeFileSync("control-change.json", JSON.stringify(r, null, 2) + "\n");'
+          fi
+      - name: Step summary
+        if: always()
+        run: |
+          node -e '
+            const fs = require("fs");
+            let r;
+            try { r = JSON.parse(fs.readFileSync("control-change.json", "utf8")); }
+            catch { r = { flagged: true, reasons: ["control-change.json missing or unreadable"] }; }
+            const lines = r.flagged
+              ? ["### Control change: needs explicit review", "", ...r.reasons.map((x) => "- " + x), ""]
+              : ["### Control change: none", ""];
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join("\n"));'
       - name: Upload control-change report
         if: always()
         uses: actions/upload-artifact@v4
@@ -83,7 +118,8 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
-      - run: npm ci
+      # No install scripts: dependencies cannot run code before the check.
+      - run: npm ci --ignore-scripts
       - name: Seeded pass/fail examples
         run: node scripts/check-selftest.mjs
       - name: Upload selftest report

@@ -25,7 +25,8 @@ or narrow steps.
 - the command (`npm run check`)
 - the candidate commit, branch, and whether the tree was clean
 - the contract digest (`--contract-digest <sha256>` or `FACTORY_CONTRACT_DIGEST`; `null` if not given)
-- the check revision: check version, and SHA-256 hashes of the check script, the CI workflow and the config files
+- the check revision: check version, and SHA-256 hashes of the check script, the CI workflow, and every tracked
+  file outside the content folders (see Control changes), so any config or tooling change shows up
 - the environment: Node, npm, OS, and runner (`github-actions`, `local` or `cloud-worker`)
 - each step's status, exit code, time, timeout and the end of its log
 - the outcome: `pass` or `fail`
@@ -35,7 +36,8 @@ Full logs go to `check-logs/<step>.log`.
 ## How CI makes it authoritative
 
 The CI workflow (`.github/workflows/ci.yml`) checks out the exact candidate commit (the PR head, not the merge
-commit), runs `npm run check`, then runs `scripts/verify-evidence.mjs` against that commit. Verification fails
+commit), runs `node scripts/check.mjs` directly with `NODE_OPTIONS` cleared (so nothing is preloaded into the
+run), then runs `scripts/verify-evidence.mjs` against that commit. Verification fails
 if the outcome is not `pass`, a required step is missing or did not pass (skipped or neutral count as missing),
 the commit does not match (stale evidence), or the tree was dirty. The evidence and logs are uploaded as the
 `check-evidence-<sha>` artifact.
@@ -49,13 +51,34 @@ succeeded. Skipped, cancelled or neutral counts as a failure.
 
 ## Control changes
 
-A control change is a change that could redefine the check itself: anything under `.github/` or `scripts/`,
-`package.json`, `package-lock.json`, the lint, format, TypeScript, Vite or Node config, `CODEOWNERS`, or a test
-change that deletes a test file, removes assertions, or adds `.skip`, `.only`, `.todo` or `it.fails`.
+A control change is any change that could weaken or redefine the check. The rule is deny by default: a changed
+file is flagged unless it is in the content allowlist:
 
-On pull requests the `control-change` job lists these. It never fails the build; it warns. A flagged PR needs
-Rolando's explicit review before merge. `.github/CODEOWNERS` routes these paths to him once code-owner review is
-turned on (ENG-142).
+- `src/**`, `tests/**`, `docs/**`, `README.md`, `index.html`
+
+So `.github/`, `scripts/`, `package.json`, `CLAUDE.md`, `.gitignore`, `.npmrc`, any root config file and any new
+top-level file are all flagged.
+
+Inside the allowlist, files that look like config are still flagged: dotfiles (such as `.prettierrc`, `.npmrc`,
+`.eslintrc`), `CODEOWNERS`, `package.json`, `tsconfig*.json`, `*.config.*` (such as `vitest.config.ts`) and
+`vitest.workspace*`.
+
+Test and code changes are also flagged when they:
+
+- delete a test file
+- remove more assertions or tests than they add (`expect(`, `expect.soft(`, `assert(`, `it(`, `test(`)
+- add `.skip`, `.only`, `.todo`, `.fails`, `skipIf`, `runIf` or `.concurrent.skip` / `.concurrent.only`
+- add `@ts-nocheck`, `@ts-ignore`, `@ts-expect-error` or `eslint-disable` in any file
+
+Plain edits to source, tests, docs, `README.md` or `index.html` are not flagged.
+
+On pull requests, the `control-change` job runs the classifier from the base branch, not from the PR, so a PR
+cannot change the rules it is judged by. If the base branch has no classifier yet (true for the first PR that adds
+it), the PR is flagged with "no trusted classifier on base branch".
+
+This job only reports. It does not fail CI. It writes a warning and a summary, and Rolando's review of a flagged
+PR is the actual gate. That stays true until ENG-142 turns on the ruleset with required code-owner review;
+`.github/CODEOWNERS` routes protected paths to him for that.
 
 ## Cloud worker parity
 
@@ -90,8 +113,10 @@ Measured on a cloud worker (Node 22): `npm run check` about 5 s; full selftest (
 
 ## Known limits
 
-- G-B4: a `pull_request` run uses the PR's own copy of the workflow and scripts. A PR could change the check and
-  still go green. The control-change flag and human review of those changes are the real control until ENG-142
-  turns on the ruleset and code-owner review.
+- G-B4: the `check` job runs the PR's own copy of the workflow and scripts. A PR could change the check and still
+  go green. The classifier runs from the base branch, so such a PR is flagged, but the flag does not block merge.
+  Human review of flagged PRs is the real control until ENG-142 turns on the ruleset and code-owner review.
+- The classifier works on file paths and diff lines. It can be fooled by a change it does not recognise, for example
+  weakening an assertion while keeping the same number of `expect(` lines.
 - The check revision hash shows what ran, but nothing compares it to a trusted baseline in CI yet.
   `verify-evidence.mjs --expect-check-revision` supports that when a baseline is stored outside the PR.

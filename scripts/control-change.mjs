@@ -2,24 +2,29 @@
 // Flag control changes between two refs (ENG-140, G-B3/G-B4). Detective only:
 // always exits 0 (an uncomputable diff is reported as flagged), writes a JSON report and prints reasons.
 //
-//   node scripts/control-change.mjs --base <ref> --head <ref> [--out <json>]
+//   node scripts/control-change.mjs --base <ref> --head <ref> [--repo <path>] [--out <json>]
+//
+// In CI this runs from a checkout of the BASE commit (trusted/) against the head
+// repo (--repo), so a PR cannot redefine its own classifier.
 
 import { spawnSync } from 'node:child_process';
-import { appendFileSync, writeFileSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 import { classifyDiff } from './lib/control-change.mjs';
 
 function usage(message) {
   console.error(`control-change: ${message}`);
-  console.error('usage: node scripts/control-change.mjs --base <ref> --head <ref> [--out <json>]');
+  console.error(
+    'usage: node scripts/control-change.mjs --base <ref> --head <ref> [--repo <path>] [--out <json>]',
+  );
   process.exit(2);
 }
 
 const argv = process.argv.slice(2);
-const opts = { base: null, head: null, out: 'control-change.json' };
+const opts = { base: null, head: null, repo: '.', out: 'control-change.json' };
 for (let i = 0; i < argv.length; i++) {
   const arg = argv[i];
   const v = argv[i + 1];
-  if (!['--base', '--head', '--out'].includes(arg)) usage(`unknown argument ${arg}`);
+  if (!['--base', '--head', '--repo', '--out'].includes(arg)) usage(`unknown argument ${arg}`);
   if (v === undefined || v === '') usage(`${arg} needs a value`);
   opts[arg.slice(2)] = v;
   i++;
@@ -27,7 +32,7 @@ for (let i = 0; i < argv.length; i++) {
 if (!opts.base || !opts.head) usage('--base and --head are required');
 
 function git(args) {
-  const r = spawnSync('git', args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  const r = spawnSync('git', args, { cwd: opts.repo, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   if (r.status !== 0) {
     throw new Error(`git ${args.join(' ')} failed: ${(r.stderr || '').trim()}`);
   }
@@ -84,10 +89,6 @@ if (process.env.GITHUB_ACTIONS === 'true') {
     for (const r of result.reasons)
       console.log(`::warning title=Control change::${r.replace(/\r?\n/g, ' ')}`);
   }
-  if (process.env.GITHUB_STEP_SUMMARY) {
-    const lines = result.flagged
-      ? ['### Control change: needs explicit review', '', ...result.reasons.map((r) => `- ${r}`), '']
-      : ['### Control change: none', ''];
-    appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join('\n'));
-  }
+  // The workflow writes the step summary from the JSON report (it also covers
+  // the case where the base branch has no trusted classifier).
 }

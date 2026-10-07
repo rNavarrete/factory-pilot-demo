@@ -181,3 +181,15 @@ test('allowControlChange does not excuse other failures', () => {
   e.outcome = 'fail';
   expectRejected(e, { expectCommit: COMMIT, allowControlChange: true }, /outcome/i);
 });
+
+for (const field of ['checkVersion', 'checkScriptSha256', 'workflowSha256', 'configSha256']) {
+  test(`rejects a trusted baseline missing ${field}`, () => {
+    const trusted = trustedRevision();
+    delete trusted[field];
+    expectRejected(goodEvidence(), { expectCommit: COMMIT, expectCheckRevision: trusted });
+  });
+}
+
+test('rejects an empty trusted baseline', () => {
+  expectRejected(goodEvidence(), { expectCommit: COMMIT, expectCheckRevision: {} });
+});

@@ -64,10 +64,14 @@ export function verifyEvidence(evidence, expectations = {}) {
     } else if (!actual) {
       reasons.push('checkRevision is missing');
     } else {
-      const keys = new Set([...CHECK_REVISION_KEYS, ...Object.keys(expectCheckRevision)]);
-      for (const key of keys) {
-        if (!(key in expectCheckRevision)) continue;
-        if (actual[key] !== expectCheckRevision[key]) {
+      // Every revision key must be present in BOTH the baseline and the evidence,
+      // and equal. A baseline missing a key cannot vouch for it.
+      for (const key of CHECK_REVISION_KEYS) {
+        if (!(key in expectCheckRevision) || expectCheckRevision[key] == null) {
+          reasons.push(`trusted checkRevision baseline is missing ${key}`);
+        } else if (!(key in actual) || actual[key] == null) {
+          reasons.push(`checkRevision.${key} is missing`);
+        } else if (actual[key] !== expectCheckRevision[key]) {
           reasons.push(
             `checkRevision.${key} is ${JSON.stringify(actual[key])}, trusted baseline is ${JSON.stringify(expectCheckRevision[key])}`,
           );

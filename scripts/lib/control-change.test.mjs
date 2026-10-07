@@ -154,3 +154,89 @@ test('one protected file among many flags the whole diff', () => {
     { path: 'vite.config.ts', status: 'modified', patch: '@@\n+x\n' },
   ]);
 });
+
+// Deny-by-default: anything outside the content allowlist is flagged.
+for (const path of [
+  'CLAUDE.md',
+  '.npmrc',
+  '.gitignore',
+  'vitest.config.ts',
+  'some-new-file.txt',
+  'public/favicon.svg',
+  'config/anything.json',
+]) {
+  test(`path outside the content allowlist (${path}) is flagged`, () => {
+    assertFlagged([{ path, status: 'added', patch: '@@\n+x\n' }]);
+  });
+}
+
+// Config-looking basenames are flagged even inside allowlisted folders.
+for (const path of [
+  'src/.prettierrc',
+  'tests/.npmrc',
+  'docs/.eslintrc.json',
+  'docs/CODEOWNERS',
+  'src/package.json',
+  'tests/tsconfig.json',
+  'tests/tsconfig.build.json',
+  'tests/vitest.config.ts',
+  'src/postcss.config.js',
+  'tests/vitest.workspace.ts',
+]) {
+  test(`config-looking file inside the allowlist (${path}) is flagged`, () => {
+    assertFlagged([{ path, status: 'added', patch: '@@\n+x\n' }]);
+  });
+}
+
+test('plain edits to content files are not flagged', () => {
+  assertNotFlagged([
+    { path: 'docs/checks.md', status: 'modified', patch: '@@\n-old\n+new\n' },
+    { path: 'README.md', status: 'modified', patch: '@@\n-old\n+new\n' },
+    { path: 'index.html', status: 'modified', patch: '@@\n-<p>a</p>\n+<p>b</p>\n' },
+    { path: 'tests/helpers.ts', status: 'added', patch: '@@\n+export const h = 1;\n' },
+  ]);
+});
+
+for (const added of [
+  "it.skipIf(true)('x', () => {});",
+  "it.runIf(false)('x', () => {});",
+  "describe.skipIf(true)('x', () => {});",
+  "it.concurrent.skip('x', () => {});",
+  "it.concurrent.only('x', () => {});",
+]) {
+  test(`adding ${added.split("('")[0].split('(')[0]} in a test file is flagged`, () => {
+    assertFlagged([{ path: 'tests/books.test.ts', status: 'modified', patch: `@@\n+  ${added}\n` }]);
+  });
+}
+
+for (const removed of ['expect.soft(a).toBe(1);', 'assert(a === 1);']) {
+  test(`removing ${removed.split('(')[0]}( in a test file is flagged`, () => {
+    assertFlagged([
+      {
+        path: 'tests/books.test.ts',
+        status: 'modified',
+        patch: `@@\n   it('x', () => {\n-    ${removed}\n   });\n`,
+      },
+    ]);
+  });
+}
+
+for (const directive of [
+  '// @ts-nocheck',
+  '// @ts-ignore',
+  '// @ts-expect-error',
+  '/* eslint-disable */',
+  '// eslint-disable-next-line',
+]) {
+  for (const path of ['src/books.ts', 'tests/books.test.ts']) {
+    test(`adding "${directive}" in ${path} is flagged`, () => {
+      assertFlagged([{ path, status: 'modified', patch: `@@\n+${directive}\n const a = 1;\n` }]);
+    });
+  }
+}
+
+test('removing a suppression directive is not flagged', () => {
+  assertNotFlagged([
+    { path: 'src/books.ts', status: 'modified', patch: '@@\n-// @ts-ignore\n const a = 1;\n' },
+  ]);
+});
