@@ -1,3 +1,6 @@
+# CI for the one trusted check command (ENG-140, governance G-B1..G-B5).
+# The `verified` job is the single status ENG-142's ruleset requires.
+# Changes to this file are a control change (see scripts/control-change.mjs, CODEOWNERS).
 name: CI
 
 on:
@@ -8,16 +11,107 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # Exact candidate commit: the PR head, not GitHub's synthetic merge ref.
+      CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: npm
       - run: npm ci
-      - run: npm run typecheck
-      - run: npm test
-      - run: npm run build
+      - name: npm run check
+        run: npm run check -- --out check-evidence.json
+      - name: Verify evidence for the exact candidate commit
+        # Control changes are reported by the control-change job and reviewed by a human;
+        # they do not by themselves fail the evidence here.
+        run: node scripts/verify-evidence.mjs check-evidence.json --expect-commit "$CANDIDATE_SHA" --allow-control-change
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: check-evidence-${{ env.CANDIDATE_SHA }}
+          path: |
+            check-evidence.json
+            check-logs/
+          if-no-files-found: warn
+
+  control-change:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Detective only: never fails. Flags gate/workflow/config/test-assertion changes for Rolando's review.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - name: Classify diff
+        run: >-
+          node scripts/control-change.mjs
+          --base ${{ github.event.pull_request.base.sha }}
+          --head ${{ github.event.pull_request.head.sha }}
+          --out control-change.json
+      - name: Upload control-change report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: control-change-${{ github.event.pull_request.head.sha }}
+          path: control-change.json
+          if-no-files-found: warn
+
+  check-selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Seeded pass/fail examples
+        run: node scripts/check-selftest.mjs
+      - name: Upload selftest report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: check-selftest-${{ github.event.pull_request.head.sha || github.sha }}
+          path: check-selftest.json
+          if-no-files-found: warn
+
+  verified:
+    # The single required status (ENG-142). It runs even when a dependency failed,
+    # was skipped or was cancelled, and passes ONLY if every dependency reported
+    # 'success'. Skipped, cancelled, neutral or missing results all count as failure,
+    # so a candidate cannot pass by having its checks not run.
+    needs: [check, check-selftest]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require success from every check
+        env:
+          CHECK_RESULT: ${{ needs.check.result }}
+          SELFTEST_RESULT: ${{ needs.check-selftest.result }}
+        run: |
+          echo "check: $CHECK_RESULT"
+          echo "check-selftest: $SELFTEST_RESULT"
+          if [ "$CHECK_RESULT" != "success" ] || [ "$SELFTEST_RESULT" != "success" ]; then
+            echo "::error::not verified: every required job must report success (skipped/cancelled/neutral fail)"
+            exit 1
+          fi

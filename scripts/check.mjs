@@ -1,0 +1,345 @@
+#!/usr/bin/env node
+// The one trusted check command for this repo (ENG-140, governance G-B1/G-B5).
+//
+//   npm run check [-- --out <path>] [-- --contract-digest <sha256 hex>]
+//
+// Runs a fixed list of steps (format, lint, typecheck, test, build), each with a
+// fixed timeout, always running every step so the evidence shows every failure.
+// Writes an evidence JSON (schemaVersion 1) and full per-step logs to check-logs/.
+// Exits 0 only when every step passed AND the working tree is clean (a dirty
+// tree is not a candidate commit).
+//
+// Deliberately NOT supported: narrowing the step list (--only) or changing
+// timeouts from the environment. The command must not be able to redefine its
+// own evidence. Changes to this file are flagged as a control change.
+
+import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const CHECK_VERSION = '1';
+const SCHEMA_VERSION = 1;
+const LOG_TAIL_LINES = 200;
+
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const SCRIPT_PATH = fileURLToPath(import.meta.url);
+const WORKFLOW_PATH = join(ROOT, '.github', 'workflows', 'ci.yml');
+const CONFIG_FILES = [
+  'package.json',
+  'package-lock.json',
+  'eslint.config.js',
+  '.prettierrc.json',
+  'tsconfig.json',
+  'vite.config.ts',
+  '.nvmrc',
+];
+
+// Fixed step list and timeouts. Order matters only for display.
+const STEPS = [
+  { name: 'format', bin: 'prettier', args: ['--check', '.'], timeoutMs: 120_000 },
+  { name: 'lint', bin: 'eslint', args: ['.'], timeoutMs: 180_000 },
+  { name: 'typecheck', bin: 'tsc', args: ['--noEmit'], timeoutMs: 180_000 },
+  { name: 'test', bin: 'vitest', args: ['run'], timeoutMs: 300_000 },
+  { name: 'build', bin: 'vite', args: ['build'], timeoutMs: 180_000 },
+];
+
+function usage(message) {
+  if (message) console.error(`check: ${message}`);
+  console.error('usage: node scripts/check.mjs [--out <path>] [--contract-digest <sha256 hex>]');
+  process.exit(1);
+}
+
+function parseArgs(argv) {
+  const opts = {
+    out: 'check-evidence.json',
+    contractDigest: process.env.FACTORY_CONTRACT_DIGEST || null,
+  };
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    const [flag, inline] = arg.startsWith('--') && arg.includes('=') ? arg.split(/=(.*)/s) : [arg, undefined];
+    const value = () => {
+      const v = inline ?? argv[++i];
+      if (v === undefined || v === '') usage(`${flag} needs a value`);
+      return v;
+    };
+    if (flag === '--out') opts.out = value();
+    else if (flag === '--contract-digest') opts.contractDigest = value();
+    else usage(`unknown argument: ${arg} (the step list and timeouts are fixed)`);
+  }
+  if (opts.contractDigest !== null) {
+    opts.contractDigest = opts.contractDigest.toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(opts.contractDigest)) {
+      usage('--contract-digest / FACTORY_CONTRACT_DIGEST must be a 64-character sha256 hex string');
+    }
+  }
+  return opts;
+}
+
+function sha256(buf) {
+  return createHash('sha256').update(buf).digest('hex');
+}
+
+function fileSha256(path) {
+  return existsSync(path) ? sha256(readFileSync(path)) : null;
+}
+
+function configSha256() {
+  const h = createHash('sha256');
+  for (const name of [...CONFIG_FILES].sort()) {
+    const p = join(ROOT, name);
+    h.update(`${name}\0`);
+    h.update(existsSync(p) ? readFileSync(p) : '<missing>');
+    h.update('\0');
+  }
+  return h.digest('hex');
+}
+
+function git(args) {
+  const r = spawnSync('git', args, { cwd: ROOT, encoding: 'utf8' });
+  return r.status === 0 ? r.stdout.trim() : null;
+}
+
+function treeIsClean() {
+  const r = spawnSync('git', ['status', '--porcelain'], { cwd: ROOT, encoding: 'utf8' });
+  return r.status === 0 && r.stdout.trim() === '';
+}
+
+function candidate() {
+  let branch = process.env.GITHUB_HEAD_REF || null;
+  if (!branch) {
+    const b = git(['rev-parse', '--abbrev-ref', 'HEAD']);
+    branch = b && b !== 'HEAD' ? b : process.env.GITHUB_REF_NAME || null;
+  }
+  return { commit: git(['rev-parse', 'HEAD']), treeClean: treeIsClean(), branch };
+}
+
+function runner() {
+  const forced = process.env.FACTORY_RUNNER;
+  if (forced === 'github-actions' || forced === 'local' || forced === 'cloud-worker') return forced;
+  return process.env.GITHUB_ACTIONS === 'true' ? 'github-actions' : 'local';
+}
+
+function environment() {
+  const npm = spawnSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['--version'], {
+    encoding: 'utf8',
+  });
+  return {
+    node: process.version,
+    npm: npm.status === 0 ? npm.stdout.trim() : null,
+    platform: process.platform,
+    arch: process.arch,
+    ci: process.env.CI === 'true' || process.env.GITHUB_ACTIONS === 'true',
+    runner: runner(),
+  };
+}
+
+function tail(text, lines = LOG_TAIL_LINES) {
+  const all = text.split('\n');
+  if (all.length && all[all.length - 1] === '') all.pop();
+  return all.slice(-lines).join('\n');
+}
+
+function environmentStep() {
+  const started = Date.now();
+  const nvmrcPath = join(ROOT, '.nvmrc');
+  const wanted = existsSync(nvmrcPath) ? readFileSync(nvmrcPath, 'utf8').trim().replace(/^v/, '') : null;
+  const wantedMajor = wanted ? wanted.split('.')[0] : null;
+  const actualMajor = process.versions.node.split('.')[0];
+  const ok = wantedMajor !== null && wantedMajor === actualMajor;
+  const log = ok
+    ? `node ${process.version} matches .nvmrc (${wanted})`
+    : wantedMajor === null
+      ? 'cannot read .nvmrc; refusing to run checks without a pinned Node version'
+      : `node ${process.version} does not match .nvmrc (${wanted}); install Node ${wantedMajor} (e.g. nvm use) and rerun`;
+  return {
+    name: 'environment',
+    command: 'node --version (must match .nvmrc major)',
+    status: ok ? 'pass' : 'fail',
+    exitCode: ok ? 0 : 1,
+    durationMs: Date.now() - started,
+    timeoutMs: 0,
+    logTail: log,
+  };
+}
+
+function runStep(step, logDir) {
+  const command = `${step.bin} ${step.args.join(' ')}`;
+  const binPath = join(ROOT, 'node_modules', '.bin', step.bin);
+  const started = Date.now();
+  return new Promise((resolveStep) => {
+    let output = '';
+    let timedOut = false;
+    let settled = false;
+    let timer = null;
+    const finish = (status, exitCode, extra = '') => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (extra) output += `${output.endsWith('\n') || output === '' ? '' : '\n'}${extra}\n`;
+      writeFileSync(join(logDir, `${step.name}.log`), `$ ${command}\n${output}`);
+      resolveStep({
+        name: step.name,
+        command,
+        status,
+        exitCode,
+        durationMs: Date.now() - started,
+        timeoutMs: step.timeoutMs,
+        logTail: tail(output),
+      });
+    };
+
+    if (!existsSync(binPath)) {
+      writeFileSync(join(logDir, `${step.name}.log`), `$ ${command}\nmissing ${binPath}; run npm ci\n`);
+      resolveStep({
+        name: step.name,
+        command,
+        status: 'error',
+        exitCode: null,
+        durationMs: Date.now() - started,
+        timeoutMs: step.timeoutMs,
+        logTail: `missing ${binPath}; run npm ci`,
+      });
+      return;
+    }
+
+    const child = spawn(binPath, step.args, {
+      cwd: ROOT,
+      env: { ...process.env, FORCE_COLOR: '0', NO_COLOR: '1' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
+    });
+    const onData = (chunk) => {
+      output += chunk.toString();
+    };
+    child.stdout.on('data', onData);
+    child.stderr.on('data', onData);
+
+    const killTree = (signal) => {
+      try {
+        if (process.platform !== 'win32') process.kill(-child.pid, signal);
+        else child.kill(signal);
+      } catch {
+        // already gone
+      }
+    };
+    timer = setTimeout(() => {
+      timedOut = true;
+      killTree('SIGTERM');
+      setTimeout(() => killTree('SIGKILL'), 5_000).unref();
+    }, step.timeoutMs);
+
+    child.on('error', (err) => finish('error', null, `check: failed to start ${command}: ${err.message}`));
+    child.on('close', (code, signal) => {
+      if (timedOut) {
+        finish('timeout', code, `check: ${step.name} exceeded ${step.timeoutMs}ms and was killed`);
+      } else if (code === 0) {
+        finish('pass', 0);
+      } else {
+        finish('fail', code, signal ? `check: ${step.name} terminated by ${signal}` : '');
+      }
+    });
+  });
+}
+
+function pad(s, n) {
+  return String(s).padEnd(n);
+}
+
+function printTable(evidence) {
+  const rows = evidence.steps.map((s) => [s.name, s.status, s.exitCode ?? '-', `${s.durationMs}ms`]);
+  console.log('');
+  console.log(`${pad('step', 12)}${pad('status', 10)}${pad('exit', 6)}duration`);
+  for (const r of rows) console.log(`${pad(r[0], 12)}${pad(r[1], 10)}${pad(r[2], 6)}${r[3]}`);
+  console.log('');
+  console.log(`commit:     ${evidence.candidate.commit ?? '(none)'}`);
+  console.log(`tree clean: ${evidence.candidate.treeClean}`);
+  console.log(`outcome:    ${evidence.outcome.toUpperCase()} (${evidence.durationMs}ms)`);
+  if (!evidence.candidate.treeClean) {
+    console.log('            working tree is dirty: commit your changes; a dirty tree is not a candidate');
+  }
+}
+
+function appendStepSummary(evidence, outPath) {
+  const file = process.env.GITHUB_STEP_SUMMARY;
+  if (!file) return;
+  const lines = [
+    `### npm run check: ${evidence.outcome === 'pass' ? 'pass' : 'FAIL'}`,
+    '',
+    `Commit \`${evidence.candidate.commit}\`, tree clean: ${evidence.candidate.treeClean}, evidence: \`${outPath}\``,
+    '',
+    '| step | status | exit | duration |',
+    '| --- | --- | --- | --- |',
+    ...evidence.steps.map((s) => `| ${s.name} | ${s.status} | ${s.exitCode ?? '-'} | ${s.durationMs}ms |`),
+    '',
+  ];
+  try {
+    appendFileSync(file, lines.join('\n'));
+  } catch (err) {
+    console.error(`check: could not write GITHUB_STEP_SUMMARY: ${err.message}`);
+  }
+}
+
+async function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  const outPath = resolve(process.cwd(), opts.out);
+  const logDir = join(ROOT, 'check-logs');
+  mkdirSync(logDir, { recursive: true });
+
+  const startedAt = new Date();
+  const cand = candidate();
+  const checkRevision = {
+    checkVersion: CHECK_VERSION,
+    checkScriptSha256: fileSha256(SCRIPT_PATH),
+    workflowSha256: fileSha256(WORKFLOW_PATH),
+    configSha256: configSha256(),
+  };
+
+  const steps = [];
+  const env = environmentStep();
+  steps.push(env);
+  writeFileSync(join(logDir, 'environment.log'), `${env.logTail}\n`);
+  if (env.status !== 'pass') {
+    console.error(`check: ${env.logTail}`);
+  } else {
+    for (const step of STEPS) {
+      process.stdout.write(`check: ${step.name} ... `);
+      const result = await runStep(step, logDir);
+      console.log(`${result.status} (${result.durationMs}ms)`);
+      steps.push(result);
+    }
+  }
+
+  // Re-check after the steps: a step that dirties the tree also invalidates the candidate.
+  cand.treeClean = cand.treeClean && treeIsClean();
+  const allPassed =
+    steps.every((s) => s.status === 'pass') && STEPS.every((d) => steps.some((s) => s.name === d.name));
+  const finishedAt = new Date();
+  const evidence = {
+    schemaVersion: SCHEMA_VERSION,
+    command: 'npm run check',
+    startedAt: startedAt.toISOString(),
+    finishedAt: finishedAt.toISOString(),
+    durationMs: finishedAt.getTime() - startedAt.getTime(),
+    candidate: cand,
+    contractDigest: opts.contractDigest,
+    checkRevision,
+    environment: environment(),
+    steps,
+    outcome: allPassed && cand.treeClean && cand.commit ? 'pass' : 'fail',
+  };
+
+  mkdirSync(dirname(outPath), { recursive: true });
+  writeFileSync(outPath, `${JSON.stringify(evidence, null, 2)}\n`);
+  printTable(evidence);
+  console.log(`evidence:   ${outPath}`);
+  console.log(`logs:       ${logDir}`);
+  appendStepSummary(evidence, opts.out);
+  process.exitCode = evidence.outcome === 'pass' ? 0 : 1;
+}
+
+main().catch((err) => {
+  console.error(`check: internal error: ${err?.stack ?? err}`);
+  process.exitCode = 1;
+});
