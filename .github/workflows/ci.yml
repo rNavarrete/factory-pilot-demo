@@ -5,6 +5,8 @@ name: CI
 
 on:
   pull_request:
+    # `edited` so a changed title/body (the Contract-Digest claim) re-runs the check.
+    types: [opened, synchronize, reopened, edited]
   push:
     branches: [main]
 
@@ -34,15 +36,20 @@ jobs:
       # No install scripts: dependencies cannot run code before the check.
       - run: npm ci --ignore-scripts
       - name: Check (node scripts/check.mjs, not via npm)
+        # On pull_request events, check.mjs reads the PR title/body from the event
+        # payload file (GITHUB_EVENT_PATH), never via shell interpolation, and records
+        # the CLAIMED contract digest (PR body "Contract-Digest:" line). A malformed or
+        # inconsistent claim fails the check.
         env:
           NODE_OPTIONS: ''
-        run: node scripts/check.mjs --out check-evidence.json
+          CLAIM_FLAG: ${{ github.event_name == 'pull_request' && '--contract-claim-from-event' || '' }}
+        run: node scripts/check.mjs --out check-evidence.json $CLAIM_FLAG
       - name: Verify evidence for the exact candidate commit
         # Control changes are reported by the control-change job and reviewed by a human.
-        # No --expect-contract-digest here on purpose: the trusted expected digest comes
-        # from the controller's approval record, not from the candidate's PR, so the
-        # controller re-runs this verifier on the uploaded evidence with
-        # --expect-contract-digest <approved digest>.
+        # CI records only the digest the PR CLAIMS; it is not trusted. No
+        # --expect-contract-digest here on purpose: the controller re-runs this verifier
+        # on the uploaded evidence with --expect-contract-digest <digest from its trusted
+        # approval record>, which rejects evidence whose claimed digest differs.
         run: node scripts/verify-evidence.mjs check-evidence.json --expect-commit "$CANDIDATE_SHA"
       - name: Upload evidence
         if: always()

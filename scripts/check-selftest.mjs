@@ -11,6 +11,8 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DIGEST = 'ab'.repeat(32);
+// Digest claimed in the PR body for the contract-claim cases (distinct from DIGEST).
+const CLAIM_DIGEST = '0123456789abcdef'.repeat(4);
 const CASE_TIMEOUT_MS = 5 * 60 * 1000;
 const UNIT_TIMEOUT_MS = 60 * 1000;
 const REQUIRED = ['format', 'lint', 'typecheck', 'test', 'build'];
@@ -67,8 +69,15 @@ function commitSeed(dir) {
   git(dir, 'commit', '-q', '--no-verify', '-m', 'selftest seed');
 }
 
+function writeEvent(file, title, body) {
+  fs.writeFileSync(file, JSON.stringify({ pull_request: { title, body } }) + '\n');
+}
+
 // fail: steps that must fail. ignore: steps whose result is not asserted.
 // Every other step in the evidence must pass.
+// event(file): writes a fake GitHub event to `file` (outside the repo copy) and
+// runs check.mjs with --contract-claim-from-event instead of --contract-digest.
+// claimError: check must exit nonzero even though every step passes.
 const CASES = [
   { name: 'baseline', seed: () => {}, expectPass: true },
   {
@@ -117,6 +126,23 @@ const CASES = [
     fail: [],
     dirty: true,
   },
+  {
+    name: 'contract claim',
+    seed: () => {},
+    expectPass: true,
+    event: (file) =>
+      writeEvent(file, `[T1 a1 ${CLAIM_DIGEST.slice(0, 12)}] x`, `Contract-Digest: ${CLAIM_DIGEST}`),
+    expectDigest: CLAIM_DIGEST,
+    expectDigestSource: 'pr-body',
+  },
+  {
+    name: 'claim mismatch',
+    seed: () => {},
+    event: (file) => writeEvent(file, '[T1 a1 fedcba987654] x', `Contract-Digest: ${CLAIM_DIGEST}`),
+    // check.mjs records the claim as its own "contract" step; other steps still pass.
+    ignore: ['contract'],
+    claimError: true,
+  },
 ];
 
 function checkCase(c, files) {
@@ -129,19 +155,32 @@ function checkCase(c, files) {
     c.seed(dir);
     const head = git(dir, 'rev-parse', 'HEAD');
     const out = path.join(dir, '..', `${path.basename(dir)}-e.json`);
-    const r = run(process.execPath, ['scripts/check.mjs', '--out', out, '--contract-digest', DIGEST], {
+    // No case inherits a real GitHub event from the environment.
+    const env = { ...process.env, FACTORY_CONTRACT_DIGEST: '', GITHUB_STEP_SUMMARY: '' };
+    delete env.GITHUB_EVENT_PATH;
+    let args = ['--contract-digest', DIGEST];
+    let eventFile = null;
+    if (c.event) {
+      eventFile = path.join(dir, '..', `${path.basename(dir)}-event.json`);
+      c.event(eventFile);
+      env.GITHUB_EVENT_PATH = eventFile;
+      args = ['--contract-claim-from-event'];
+    }
+    const r = run(process.execPath, ['scripts/check.mjs', '--out', out, ...args], {
       cwd: dir,
       timeout: CASE_TIMEOUT_MS,
       killSignal: 'SIGKILL',
-      env: { ...process.env, FACTORY_CONTRACT_DIGEST: '', GITHUB_STEP_SUMMARY: '' },
+      env,
     });
+    if (eventFile) fs.rmSync(eventFile, { force: true });
     exitCode = r.status;
     if (r.error) problems.push(`check.mjs did not finish: ${r.error.message}`);
     try {
       evidence = JSON.parse(fs.readFileSync(out, 'utf8'));
       fs.rmSync(out, { force: true });
     } catch (err) {
-      problems.push(`no readable evidence: ${err.message}`);
+      // A rejected contract claim may stop before evidence is written; only the exit code matters then.
+      if (!c.claimError) problems.push(`no readable evidence: ${err.message}`);
     }
 
     if (c.expectPass) {
@@ -154,7 +193,11 @@ function checkCase(c, files) {
       const steps = Array.isArray(evidence.steps) ? evidence.steps : [];
       const byName = new Map(steps.map((s) => [s.name, s]));
       if (evidence.schemaVersion !== 1) problems.push(`schemaVersion ${evidence.schemaVersion}`);
-      if (evidence.outcome !== (c.expectPass ? 'pass' : 'fail')) {
+      if (c.claimError) {
+        if (evidence.outcome === 'pass' && !(evidence.contractClaimErrors?.length > 0)) {
+          problems.push('outcome pass with no contractClaimErrors for a mismatched claim');
+        }
+      } else if (evidence.outcome !== (c.expectPass ? 'pass' : 'fail')) {
         problems.push(`outcome ${evidence.outcome}`);
       }
       if (evidence.candidate?.commit !== head) {
@@ -163,7 +206,15 @@ function checkCase(c, files) {
       if (evidence.candidate?.treeClean !== !c.dirty) {
         problems.push(`treeClean ${evidence.candidate?.treeClean}`);
       }
-      if (evidence.contractDigest !== DIGEST) problems.push('contractDigest not recorded');
+      const wantDigest = c.expectDigest ?? (c.event ? undefined : DIGEST);
+      if (wantDigest !== undefined && evidence.contractDigest !== wantDigest) {
+        problems.push(`contractDigest ${evidence.contractDigest}, expected ${wantDigest}`);
+      }
+      if (c.expectDigestSource && evidence.contractDigestSource !== c.expectDigestSource) {
+        problems.push(
+          `contractDigestSource ${evidence.contractDigestSource}, expected ${c.expectDigestSource}`,
+        );
+      }
       const rev = evidence.checkRevision ?? {};
       for (const k of ['checkVersion', 'checkScriptSha256', 'workflowSha256', 'configSha256']) {
         if (!rev[k]) problems.push(`checkRevision.${k} missing`);

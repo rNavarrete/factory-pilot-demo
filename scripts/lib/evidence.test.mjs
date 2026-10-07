@@ -233,3 +233,27 @@ test('without expectContractDigest a null contract digest still passes', () => {
   const result = verifyEvidence(e, { expectCommit: COMMIT });
   assert.equal(result.verified, true, JSON.stringify(result.reasons));
 });
+
+// Contract claim errors (PR declared a Contract-Digest that does not match its title marker, etc.).
+test('rejects evidence with contract claim errors', () => {
+  const e = goodEvidence();
+  e.contractClaimErrors = ['Contract-Digest does not start with the title marker digest'];
+  expectRejected(e, { expectCommit: COMMIT }, /contract|claim/i);
+});
+
+test('contract claim errors are not excused by allowControlChange or a matching digest', () => {
+  const e = goodEvidence();
+  e.contractClaimErrors = ['two Contract-Digest lines'];
+  expectRejected(e, { expectCommit: COMMIT, allowControlChange: true, expectContractDigest: DIGEST });
+});
+
+test('an empty or missing contractClaimErrors is fine', () => {
+  const empty = goodEvidence();
+  empty.contractClaimErrors = [];
+  const r1 = verifyEvidence(empty, { expectCommit: COMMIT });
+  assert.equal(r1.verified, true, JSON.stringify(r1.reasons));
+  const missing = goodEvidence();
+  delete missing.contractClaimErrors;
+  const r2 = verifyEvidence(missing, { expectCommit: COMMIT });
+  assert.equal(r2.verified, true, JSON.stringify(r2.reasons));
+});

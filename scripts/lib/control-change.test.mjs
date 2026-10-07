@@ -118,14 +118,17 @@ for (const added of [
   });
 }
 
-test('adding a new assertion to a test file is not flagged', () => {
-  assertNotFlagged([
-    {
-      path: 'tests/books.test.ts',
-      status: 'modified',
-      patch: "@@\n   it('x', () => {\n+    expect(c).toBe(3);\n   });\n",
-    },
-  ]);
+test('adding a new assertion to an existing test file is flagged (existing tests always need review)', () => {
+  assertFlagged(
+    [
+      {
+        path: 'tests/books.test.ts',
+        status: 'modified',
+        patch: "@@\n   it('x', () => {\n+    expect(c).toBe(3);\n   });\n",
+      },
+    ],
+    /books\.test\.ts/,
+  );
 });
 
 test('rewriting an assertion one-for-one is flagged (any edit of an existing test line counts)', () => {
@@ -304,23 +307,95 @@ test('changing a non-assertion line in a test file is flagged', () => {
   ]);
 });
 
-test('only adding lines to tests/books.test.ts is not flagged', () => {
-  assertNotFlagged([
+// Any change to an existing test-like file is flagged, even a pure addition:
+// an added early return can disable every assertion after it.
+test('only adding lines to tests/books.test.ts is flagged', () => {
+  assertFlagged(
+    [
+      {
+        path: 'tests/books.test.ts',
+        status: 'modified',
+        patch:
+          "@@ -10,3 +10,8 @@\n });\n+\n+it('new case', () => {\n+  const x = 1;\n+  expect(x).toBe(1);\n+});\n",
+      },
+    ],
+    /books\.test\.ts/,
+  );
+});
+
+test('adding only an early return inside an existing test is flagged', () => {
+  assertFlagged(
+    [
+      {
+        path: 'tests/books.test.ts',
+        status: 'modified',
+        patch:
+          "@@ -1,3 +1,4 @@\n it('adds', () => {\n+    if (Date.now() > 0) return;\n   expect(add(1, 2)).toBe(3);\n });\n",
+      },
+    ],
+    /books\.test\.ts/,
+  );
+});
+
+test('removing only a blank line from a test file is flagged', () => {
+  assertFlagged(
+    [
+      {
+        path: 'tests/books.test.ts',
+        status: 'modified',
+        patch: "@@ -1,4 +1,3 @@\n it('a', () => {});\n-\n it('b', () => {});\n",
+      },
+    ],
+    /books\.test\.ts/,
+  );
+});
+
+test('a modified test file with no patch is still flagged', () => {
+  assertFlagged([{ path: 'tests/books.test.ts', status: 'modified' }], /books\.test\.ts/);
+});
+
+for (const status of ['modified', 'M', 'changed']) {
+  test(`existing test file with status ${status} is flagged`, () => {
+    assertFlagged([{ path: 'tests/books.test.ts', status, patch: '@@\n+// note\n' }]);
+  });
+}
+
+test('renaming a test file within tests/ is flagged', () => {
+  assertFlagged(
+    [{ path: 'tests/renamed.test.ts', oldPath: 'tests/books.test.ts', status: 'renamed', patch: '' }],
+    /test|rename|move/i,
+  );
+});
+
+test('deleting a nested test file is flagged', () => {
+  assertFlagged([{ path: 'tests/sub/x.test.ts', status: 'removed' }]);
+  assertFlagged([{ path: 'tests/sub/x.test.ts', status: 'D' }]);
+});
+
+test('a brand-new test file that adds a suppression is flagged', () => {
+  assertFlagged([
     {
-      path: 'tests/books.test.ts',
-      status: 'modified',
-      patch:
-        "@@ -10,3 +10,8 @@\n });\n+\n+it('new case', () => {\n+  const x = 1;\n+  expect(x).toBe(1);\n+});\n",
+      path: 'tests/new.test.ts',
+      status: 'added',
+      patch: "@@\n+// @ts-nocheck\n+it('works', () => {\n+  expect(1).toBe(1);\n+});\n",
     },
   ]);
 });
 
-test('removing only a blank line from a test file is not flagged', () => {
+test('a brand-new test file that adds skip or only is flagged', () => {
+  assertFlagged([{ path: 'tests/new.test.ts', status: 'added', patch: "@@\n+it.skip('x', () => {});\n" }]);
+  assertFlagged([
+    { path: 'tests/new.test.ts', status: 'added', patch: "@@\n+describe.only('x', () => {});\n" },
+  ]);
+});
+
+test('a brand-new test file next to a plain src change is not flagged', () => {
   assertNotFlagged([
+    { path: 'src/books.ts', status: 'modified', patch: '@@\n-const a = 1;\n+const a = 2;\n' },
     {
-      path: 'tests/books.test.ts',
-      status: 'modified',
-      patch: "@@ -1,4 +1,3 @@\n it('a', () => {});\n-\n it('b', () => {});\n",
+      path: 'tests/books-extra.test.ts',
+      status: 'added',
+      patch: "@@\n+it('works', () => {\n+  expect(1).toBe(1);\n+});\n",
     },
   ]);
 });

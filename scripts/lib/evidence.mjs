@@ -85,6 +85,17 @@ export function verifyEvidence(evidence, expectations = {}) {
     }
   }
 
+  // A malformed or inconsistent PR contract claim (recorded by check.mjs
+  // --contract-claim-from-event) is always a rejection, with or without a trusted digest.
+  if ('contractClaimErrors' in evidence && evidence.contractClaimErrors !== undefined) {
+    const errs = evidence.contractClaimErrors;
+    if (!Array.isArray(errs)) {
+      reasons.push('contractClaimErrors is not an array');
+    } else if (errs.length > 0) {
+      reasons.push(`contract claim errors: ${errs.map(String).join('; ')}`);
+    }
+  }
+
   // Contract binding: only when the caller supplies a trusted digest (from the
   // controller's approval record, never from the candidate). Without it, unchanged.
   if (expectContractDigest !== undefined && expectContractDigest !== null) {

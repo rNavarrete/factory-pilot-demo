@@ -6,8 +6,10 @@
 // config-looking files (dotfiles, CODEOWNERS, package.json, tsconfig*.json,
 // *.config.*, vitest.workspace*) are control changes. Test-weakening edits and
 // added lint/type suppressions are flagged anywhere. Test files are judged
-// conservatively: any rename of a test-like file, any test-like file outside the
-// vitest include, and any removed or modified non-blank test line is flagged. Detective only: it never
+// conservatively: any change to an existing test file (*.test.* / *.spec.*), any
+// rename of a test-like file, any test-like file outside the vitest include, and
+// any removed or modified non-blank line under tests/ is flagged; only brand-new
+// test files inside the suite can be unflagged. Detective only: it never
 // blocks, it flags the change for Rolando's explicit review.
 //
 // The same predicate (isControlPath) decides which files feed the check's
@@ -94,6 +96,11 @@ function isDeleted(status) {
   return s === 'd' || s === 'deleted' || s === 'removed';
 }
 
+function isAdded(status) {
+  const s = String(status ?? '').toLowerCase();
+  return s === 'a' || s === 'added';
+}
+
 function isRenamed(status) {
   const s = String(status ?? '').toLowerCase();
   return s.startsWith('r') || s === 'renamed';
@@ -136,6 +143,17 @@ export function classifyDiff(files) {
 
     const testNow = isTestFile(path);
     const testBefore = oldPath ? isTestFile(oldPath) : testNow;
+    // Conservative: ANY change to an existing test file (modified, renamed, copied,
+    // removed, type change, or unknown status) is flagged. Added lines alone can
+    // disable assertions (e.g. an early `return;` at the top of a test), which no
+    // line-level heuristic reliably catches. Only brand-new test files stay
+    // unflagged (still subject to the suite, suppression and skip rules below).
+    // Plain helpers under tests/ (e.g. tests/helpers.ts) are not covered here.
+    const testNamedNow = TEST_NAME_RE.test(path);
+    const testNamedBefore = oldPath ? TEST_NAME_RE.test(oldPath) : testNamedNow;
+    if ((testNamedNow || testNamedBefore) && (!isAdded(status) || (oldPath && oldPath !== path))) {
+      reasons.push(`${path}: existing test file changed: needs review`);
+    }
     if ((testNow || testBefore) && isDeleted(status)) {
       reasons.push(`${path}: test file deleted`);
       continue;
@@ -159,7 +177,8 @@ export function classifyDiff(files) {
     }
     // Conservative: any removed or modified existing non-blank line in a test file
     // can weaken it (e.g. expect(add(1, 2)).toBe(3) -> expect(true).toBe(true)).
-    // Pure additions are not flagged.
+    // (Pure additions to an existing test file are caught by the rule above; this
+    // still matters for plain helpers under tests/.)
     const changedLines = removed.filter((l) => l.trim() !== '');
     if (changedLines.length > 0) {
       reasons.push(

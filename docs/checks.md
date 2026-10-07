@@ -24,7 +24,9 @@ or narrow steps.
 
 - the command (`npm run check`)
 - the candidate commit, branch, and whether the tree was clean
-- the contract digest (`--contract-digest <sha256>` or `FACTORY_CONTRACT_DIGEST`; `null` if not given)
+- the contract digest and where it came from: `--contract-digest <sha256>`, `FACTORY_CONTRACT_DIGEST`, or, in CI
+  on a pull request, the PR's own `Contract-Digest:` line (see Contract claim); `null` if none was given
+- any problems with the PR's contract claim (`contractClaimErrors`)
 - the check revision: check version, and SHA-256 hashes of the check script, the CI workflow, and every tracked
   file outside the content folders (see Control changes), so any config or tooling change shows up
 - the environment: Node, npm, OS, and runner (`github-actions`, `local` or `cloud-worker`)
@@ -44,7 +46,32 @@ the commit does not match (stale evidence), or the tree was dirty. The evidence 
 
 Only a clean CI run on the exact candidate commit counts. A local run is useful, but it is not evidence.
 
-CI does not tie the evidence to an approved task. The controller does that: it knows the approved contract digest
+## Contract claim
+
+A pull request says which approved contract it is for by putting one line in its body:
+
+```text
+Contract-Digest: <64 hex characters, the SHA-256 of the contract>
+```
+
+A factory PR title starts with a marker such as `[ENG-12 a1 0123456789ab]`. The 12 hex characters in that marker
+must be the start of the `Contract-Digest` value. The claim is rejected when:
+
+- the title has a marker but the body has no valid `Contract-Digest` line
+- the digest does not start with the marker's 12 hex characters
+- the body has more than one `Contract-Digest` line
+
+A value that is not exactly 64 hex characters never counts as a claim.
+
+On pull requests CI runs the check with `--contract-claim-from-event`, which reads the PR title and body from
+the GitHub event. A valid claim is recorded as the evidence's contract digest (source `pr-body`). A rejected
+claim makes the check fail, and evidence with claim errors never verifies. A PR with no marker and no
+`Contract-Digest` line simply records no digest.
+
+The claim is only what the PR says about itself. CI records it; it does not decide whether it is the right one.
+
+CI does not tie the evidence to an approved task. The controller does that by comparing the recorded digest
+against the one it approved: it knows the approved contract digest
 and runs `scripts/verify-evidence.mjs --expect-contract-digest <sha256>`. Verification then fails if the
 evidence's contract digest is missing, `null` or different (the comparison ignores case). Without that flag a
 `null` digest is accepted, so a CI pass on its own says nothing about which task it was for.
@@ -71,14 +98,16 @@ Inside the allowlist, files that look like config are still flagged: dotfiles (s
 Test and code changes are also flagged when they:
 
 - delete a test file
-- change or remove any existing non-blank line in a test file. Only adding lines is safe, so rewriting an
-  assertion is flagged even if the number of `expect(` lines stays the same
+- change an existing test file in any way, even by only adding lines. An added line such as an early `return`
+  can switch off every assertion after it, so edits to existing tests always need Rolando's review. Only
+  brand-new files under `tests/**/*.test.ts` are safe
 - rename or move a test file (either side of the rename counts)
 - add a test file outside `tests/**/*.test.ts`, such as `src/new.test.ts`, because the suite would never run it
 - add `.skip`, `.only`, `.todo`, `.fails`, `skipIf`, `runIf` or `.concurrent.skip` / `.concurrent.only`
 - add `@ts-nocheck`, `@ts-ignore`, `@ts-expect-error` or `eslint-disable` in any file
 
-Plain edits to source, docs, `README.md` or `index.html`, and new tests added under `tests/`, are not flagged.
+Plain edits to source, docs, `README.md` or `index.html`, and brand-new test files added under
+`tests/**/*.test.ts` (without skips or suppressions), are not flagged.
 
 On pull requests, the `control-change` job runs the classifier from the base branch, not from the PR, so a PR
 cannot change the rules it is judged by. If the base branch has no classifier yet (true for the first PR that adds
@@ -97,9 +126,11 @@ npm ci
 node scripts/check-selftest.mjs
 ```
 
-The selftest runs the unit tests for the evidence and control-change logic, then runs the real check on seeded
+The selftest runs the unit tests for the evidence, control-change and contract-claim logic, then runs the real check on seeded
 copies of the repo in temp dirs: one that should pass, and ones with a format error, a lint error, a type error, a
-failing test and a dirty tree that should each fail in the right step. It prints a table, writes
+failing test and a dirty tree that should each fail in the right step. Two more cases feed it a fake pull
+request event: one with a matching contract claim, which must pass and record the claimed digest, and one whose
+title marker does not match the claim, which must fail. It prints a table, writes
 `check-selftest.json`, and exits nonzero on any mismatch. It does not change the repo. CI runs the same script in
 the `check-selftest` job.
 
@@ -107,7 +138,7 @@ A local fallback (treating a non-CI run as evidence) stays off until the cloud w
 
 ## Runtime
 
-Measured on a cloud worker (Node 22): `npm run check` about 5 s; full selftest (unit tests plus six seeded cases) about 31 s.
+Measured on a cloud worker (Node 22): `npm run check` about 5 s; full selftest (unit tests plus eight seeded cases) about 40 s.
 
 ## Governance map
 

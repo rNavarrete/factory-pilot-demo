@@ -2,6 +2,14 @@
 // The one trusted check command for this repo (ENG-140, governance G-B1/G-B5).
 //
 //   npm run check [-- --out <path>] [-- --contract-digest <sha256 hex>]
+//                 [-- --contract-claim-from-event]
+//
+// --contract-claim-from-event (CI, pull_request events): read the PR title/body
+// from the GitHub event payload (GITHUB_EVENT_PATH) and record the contract
+// digest the PR CLAIMS (a "Contract-Digest: <hex>" body line, which must match
+// the title's factory marker when there is one). A malformed claim fails the
+// check (step "contract"). The claim is not trusted: the controller compares it
+// with its approval record via verify-evidence --expect-contract-digest.
 //
 // Runs a fixed list of steps (format, lint, typecheck, test, build), each with a
 // fixed timeout, always running every step so the evidence shows every failure.
@@ -19,6 +27,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileS
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isControlPath } from './lib/control-change.mjs';
+import { parseContractClaim } from './lib/contract-claim.mjs';
 
 const CHECK_VERSION = '1';
 const SCHEMA_VERSION = 1;
@@ -53,14 +62,19 @@ const STEPS = [
 
 function usage(message) {
   if (message) console.error(`check: ${message}`);
-  console.error('usage: node scripts/check.mjs [--out <path>] [--contract-digest <sha256 hex>]');
+  console.error(
+    'usage: node scripts/check.mjs [--out <path>] [--contract-digest <sha256 hex>] [--contract-claim-from-event]',
+  );
   process.exit(1);
 }
 
 function parseArgs(argv) {
+  const envDigest = process.env.FACTORY_CONTRACT_DIGEST || null;
   const opts = {
     out: 'check-evidence.json',
-    contractDigest: process.env.FACTORY_CONTRACT_DIGEST || null,
+    contractDigest: envDigest,
+    contractDigestSource: envDigest ? 'env' : null,
+    contractClaimFromEvent: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -71,7 +85,11 @@ function parseArgs(argv) {
       return v;
     };
     if (flag === '--out') opts.out = value();
-    else if (flag === '--contract-digest') opts.contractDigest = value();
+    else if (flag === '--contract-digest') {
+      opts.contractDigest = value();
+      opts.contractDigestSource = 'flag';
+    } else if (flag === '--contract-claim-from-event' && inline === undefined)
+      opts.contractClaimFromEvent = true;
     else usage(`unknown argument: ${arg} (the step list and timeouts are fixed)`);
   }
   if (opts.contractDigest !== null) {
@@ -81,6 +99,79 @@ function parseArgs(argv) {
     }
   }
   return opts;
+}
+
+// Read the PR title/body from the GitHub event payload file. Title and body are
+// only ever handled as data here; they never pass through a shell.
+function readPrFromEvent() {
+  const path = process.env.GITHUB_EVENT_PATH;
+  if (!path) return { error: 'GITHUB_EVENT_PATH is not set; cannot read the PR contract claim' };
+  let event;
+  try {
+    event = JSON.parse(readFileSync(path, 'utf8'));
+  } catch (err) {
+    return { error: `cannot read GitHub event payload ${path}: ${err.code ?? err.message}` };
+  }
+  const pr = event && typeof event === 'object' ? event.pull_request : null;
+  if (!pr || typeof pr !== 'object') {
+    return { error: 'GitHub event payload has no pull_request; cannot read the PR contract claim' };
+  }
+  return {
+    title: typeof pr.title === 'string' ? pr.title : '',
+    body: typeof pr.body === 'string' ? pr.body : '',
+  };
+}
+
+// Resolve the recorded contract digest: explicit (--contract-digest / env) wins,
+// otherwise the PR body claim. Any claim error or explicit/claim mismatch fails.
+function resolveContract(opts) {
+  const started = Date.now();
+  let digest = opts.contractDigest;
+  let source = opts.contractDigestSource;
+  const errors = [];
+  let log;
+  if (!opts.contractClaimFromEvent) {
+    return { digest, source, errors, step: null };
+  }
+  const pr = readPrFromEvent();
+  if (pr.error) {
+    errors.push(pr.error);
+  } else {
+    const claim = parseContractClaim(pr);
+    errors.push(...claim.reasons);
+    if (claim.reasons.length === 0 && claim.digest !== null) {
+      if (digest === null) {
+        digest = claim.digest;
+        source = 'pr-body';
+      } else if (digest !== claim.digest) {
+        errors.push(
+          `${source === 'env' ? 'FACTORY_CONTRACT_DIGEST' : '--contract-digest'} ${digest} differs from PR body Contract-Digest ${claim.digest}`,
+        );
+      }
+    }
+  }
+  if (errors.length > 0) {
+    log = errors.join('\n');
+  } else {
+    log =
+      digest === null
+        ? 'no contract claim in PR (ordinary PR)'
+        : `contract digest ${digest} (source: ${source})`;
+  }
+  return {
+    digest,
+    source,
+    errors,
+    step: {
+      name: 'contract',
+      command: 'parse PR title/body contract claim (GITHUB_EVENT_PATH)',
+      status: errors.length === 0 ? 'pass' : 'fail',
+      exitCode: errors.length === 0 ? 0 : 1,
+      durationMs: Date.now() - started,
+      timeoutMs: 0,
+      logTail: log,
+    },
+  };
 }
 
 function sha256(buf) {
@@ -315,6 +406,9 @@ function printTable(evidence) {
   console.log('');
   console.log(`commit:     ${evidence.candidate.commit ?? '(none)'}`);
   console.log(`tree clean: ${evidence.candidate.treeClean}`);
+  console.log(
+    `contract:   ${evidence.contractDigest ?? '(none)'}${evidence.contractDigestSource ? ` (${evidence.contractDigestSource})` : ''}`,
+  );
   console.log(`outcome:    ${evidence.outcome.toUpperCase()} (${evidence.durationMs}ms)`);
   if (!evidence.candidate.treeClean) {
     console.log('            working tree is dirty: commit your changes; a dirty tree is not a candidate');
@@ -359,6 +453,12 @@ async function main() {
   };
 
   const steps = [];
+  const contract = resolveContract(opts);
+  if (contract.step) {
+    steps.push(contract.step);
+    writeFileSync(join(logDir, 'contract.log'), `${contract.step.logTail}\n`);
+    if (contract.step.status !== 'pass') console.error(`check: contract claim: ${contract.step.logTail}`);
+  }
   const env = environmentStep();
   steps.push(env);
   writeFileSync(join(logDir, 'environment.log'), `${env.logTail}\n`);
@@ -385,7 +485,10 @@ async function main() {
     finishedAt: finishedAt.toISOString(),
     durationMs: finishedAt.getTime() - startedAt.getTime(),
     candidate: cand,
-    contractDigest: opts.contractDigest,
+    // On failure (claim errors) no digest is recorded.
+    contractDigest: contract.errors.length === 0 ? contract.digest : null,
+    contractDigestSource: contract.errors.length === 0 && contract.digest !== null ? contract.source : null,
+    ...(contract.errors.length > 0 ? { contractClaimErrors: contract.errors } : {}),
     checkRevision,
     environment: environment(),
     steps,
