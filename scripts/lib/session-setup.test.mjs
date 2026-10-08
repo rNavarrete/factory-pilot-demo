@@ -459,8 +459,22 @@ test('CLI: after a context compaction, a good setup from this session is kept, n
 
 test('CLI: package.json changed without its lockfile is not a cache hit; npm ci rejects it and the worker is blocked', () => {
   const root = fixture();
-  const env = { CLAUDE_CODE_REMOTE: 'true', FACTORY_SETUP_GATE: 'enforce', npm_config_offline: 'true' };
+  // Offline with an empty npm cache, so npm behaves the same on every machine. Which error
+  // npm reports first (lockfile out of sync, or package not cached) depends on its version
+  // and cache, so the test checks that a real install ran and failed, not npm's wording.
+  const cache = mkdtempSync(join(tmpdir(), 'session-setup-npm-cache-'));
+  const env = {
+    CLAUDE_CODE_REMOTE: 'true',
+    FACTORY_SETUP_GATE: 'enforce',
+    npm_config_offline: 'true',
+    npm_config_cache: cache,
+  };
   try {
+    // Control: unchanged files are a cache hit.
+    assert.equal(cli(root, ['--hook'], { session_id: 's0' }, env).status, 0);
+    assert.equal(readStatus(root).status, 'ok');
+    assert.equal(readStatus(root).install, 'cache hit');
+
     const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
     manifest.devDependencies['left-pad'] = '^1.3.0';
     writeFileSync(join(root, 'package.json'), JSON.stringify(manifest, null, 2) + '\n');
@@ -469,9 +483,11 @@ test('CLI: package.json changed without its lockfile is not a cache hit; npm ci 
     assert.equal(JSON.parse(h.stdout).continue, false);
     const status = readStatus(root);
     assert.equal(status.failedStep, 'dependencies');
-    assert.match(status.steps.at(-1).detail, /npm ci exited \d+: .*in sync/s);
+    // A cache hit would have passed this step; this detail only comes from a real npm ci that failed.
+    assert.match(status.steps.at(-1).detail, /^npm ci exited [1-9]\d*: \S/);
     assert.equal(cli(root, ['--gate'], { session_id: 's1' }, env).status, 2);
   } finally {
     rmSync(root, { recursive: true, force: true });
+    rmSync(cache, { recursive: true, force: true });
   }
 });
