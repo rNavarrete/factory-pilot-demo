@@ -19,6 +19,17 @@ npm run build      # static site in dist/
 
 Cloud sessions set themselves up automatically; see [docs/setup.md](docs/setup.md).
 
+## Before you push
+
+Run the one check command:
+
+```bash
+npm run check
+```
+
+It checks format, lint, typecheck, tests and build, and passes only when all of
+them pass on a clean git tree. See [docs/checks.md](docs/checks.md) for details.
+
 ## Checks and release
 
 - **CI** (`.github/workflows/ci.yml`) runs typecheck, tests and build on every
