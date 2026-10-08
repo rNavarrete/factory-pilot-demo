@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      checks: read
+      actions: read
     env:
       GH_TOKEN: ${{ github.token }}
       SHA: ${{ github.sha }}
@@ -32,15 +32,26 @@ jobs:
         run: |
           echo "::error::release runs only from main (got $GITHUB_REF)"
           exit 1
-      - name: Require CI `verified` to have passed on this exact commit
+      - name: Require the trusted CI run on main to have passed for this exact commit
         run: |
-          # 15368 is the GitHub Actions app: a status with the same name from anything else does not count.
-          ok=$(gh api "repos/$REPO/commits/$SHA/check-runs?check_name=verified&per_page=100" \
-            --jq '[.check_runs[] | select(.app.id == 15368 and .conclusion == "success")] | length')
-          if [ "$ok" -lt 1 ]; then
-            echo "::error::commit $SHA has no successful 'verified' check from GitHub Actions"
-            exit 1
-          fi
+          # A check named `verified` is not enough: any workflow with checks: write can post
+          # one as GitHub Actions. Only a run of main's own ci.yml, started by a push to main
+          # for this commit, counts, and its `verified` job must have succeeded.
+          runs=$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$SHA&event=push&branch=main&per_page=100" \
+            --jq '[.workflow_runs[] | select(.path == ".github/workflows/ci.yml" and .event == "push"
+              and .head_branch == "main" and .head_sha == env.SHA and .status == "completed"
+              and .conclusion == "success") | .id] | .[]')
+          for run in $runs; do
+            ok=$(gh api "repos/$REPO/actions/runs/$run/jobs?per_page=100" \
+              --jq '[.jobs[] | select(.name == "verified" and .head_sha == env.SHA
+                and .status == "completed" and .conclusion == "success")] | length')
+            if [ "$ok" -ge 1 ]; then
+              echo "trusted CI run $run passed 'verified' for $SHA"
+              exit 0
+            fi
+          done
+          echo "::error::commit $SHA has no successful push-to-main run of ci.yml with a passing 'verified' job"
+          exit 1
       - name: Show what is being released
         run: |
           {
