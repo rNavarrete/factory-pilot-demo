@@ -1,4 +1,13 @@
-import { addBook, formatDate, removeBook, setStatus, STATUSES, type Book, type Status } from './books';
+import {
+  addBook,
+  formatDate,
+  removeBook,
+  removeFinished,
+  setStatus,
+  STATUSES,
+  type Book,
+  type Status,
+} from './books';
 import { loadBooks, saveBooks } from './storage';
 
 let books: Book[] = loadBooks();
@@ -7,6 +16,7 @@ const list = document.querySelector<HTMLUListElement>('#books')!;
 const form = document.querySelector<HTMLFormElement>('#add-form')!;
 const error = document.querySelector<HTMLParagraphElement>('#error')!;
 const summary = document.querySelector<HTMLParagraphElement>('#summary')!;
+const clearFinished = document.querySelector<HTMLButtonElement>('#clear-finished')!;
 
 function update(next: Book[]): void {
   books = next;
@@ -16,6 +26,7 @@ function update(next: Book[]): void {
 
 function render(): void {
   summary.textContent = `${books.length} book${books.length === 1 ? '' : 's'}`;
+  clearFinished.disabled = !books.some((b) => b.status === 'done');
   list.replaceChildren(
     ...books.map((book) => {
       const li = document.createElement('li');
@@ -62,5 +73,7 @@ form.addEventListener('submit', (e) => {
     error.textContent = (err as Error).message;
   }
 });
+
+clearFinished.addEventListener('click', () => update(removeFinished(books)));
 
 render();
