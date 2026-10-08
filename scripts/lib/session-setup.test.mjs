@@ -18,6 +18,7 @@ import {
   STATUS_SCHEMA_VERSION,
   decideInstall,
   gateDecision,
+  gateMode,
   secretLikeContent,
   secretLikePaths,
   sessionContext,
@@ -103,12 +104,37 @@ const okStatus = (over = {}) => ({
   ...over,
 });
 
+test('guard is on only for FACTORY_SETUP_GATE=enforce; unknown values fail closed', () => {
+  assert.equal(gateMode(undefined).enforce, false);
+  assert.equal(gateMode('').enforce, false);
+  assert.equal(gateMode('off').enforce, false);
+  assert.equal(gateMode('enforce').enforce, true);
+  assert.equal(gateMode(' enforce\n').enforce, true);
+  assert.equal(gateMode('Enforce').enforce, true);
+  assert.match(gateMode('yes').reason, /unknown value/);
+});
+
 test('gate allows everything outside cloud sessions', () => {
-  assert.equal(gateDecision({ remote: false, status: null, sessionId: undefined }).allow, true);
+  assert.equal(
+    gateDecision({ remote: false, enforce: true, status: null, sessionId: undefined }).allow,
+    true,
+  );
+});
+
+test('gate allows everything in cloud sessions when the guard is off', () => {
+  const failed = okStatus({ status: 'failed', failedStep: 'dependencies' });
+  for (const status of [null, failed, okStatus({ status: 'running' })]) {
+    const d = gateDecision({ remote: true, enforce: false, status, sessionId: 's1' });
+    assert.equal(d.allow, true);
+    assert.match(d.reason, /guard is off/);
+  }
 });
 
 test('gate allows only a successful setup from this session', () => {
-  assert.equal(gateDecision({ remote: true, status: okStatus(), sessionId: 's1' }).allow, true);
+  assert.equal(
+    gateDecision({ remote: true, enforce: true, status: okStatus(), sessionId: 's1' }).allow,
+    true,
+  );
 });
 
 test('gate fails closed: missing, foreign, unfinished, failed or unknown-format status all block', () => {
@@ -121,7 +147,7 @@ test('gate fails closed: missing, foreign, unfinished, failed or unknown-format 
     [okStatus({ schemaVersion: 99 }), 's1', /unknown format/],
   ];
   for (const [status, sessionId, re] of cases) {
-    const d = gateDecision({ remote: true, status, sessionId });
+    const d = gateDecision({ remote: true, enforce: true, status, sessionId });
     assert.equal(d.allow, false, `${JSON.stringify(status)} / ${sessionId}`);
     assert.match(d.reason, re);
   }
@@ -152,9 +178,27 @@ test('a service that never becomes ready fails at its timeout; a throwing probe 
 });
 
 test('a failed setup tells the worker it is an infrastructure failure', () => {
-  const text = sessionContext({ status: 'failed', failedStep: 'dependencies', steps: [] });
+  const text = sessionContext({
+    status: 'failed',
+    failedStep: 'dependencies',
+    gate: gateMode('enforce'),
+    steps: [],
+  });
   assert.match(text, /^INFRASTRUCTURE FAILURE/);
   assert.match(text, /Do not work on the task/);
+  assert.match(text, /Setup guard: on/);
+});
+
+test('with the guard off, a failed setup is reported without telling anyone to stop', () => {
+  const text = sessionContext({
+    status: 'failed',
+    failedStep: 'dependencies',
+    gate: gateMode(undefined),
+    steps: [],
+  });
+  assert.match(text, /^Workspace setup failed at step "dependencies"/);
+  assert.match(text, /Setup guard: off/);
+  assert.doesNotMatch(text, /INFRASTRUCTURE FAILURE|Do not work on the task/);
 });
 
 // ---- CLI, on a throwaway copy of the repo's setup files ----
@@ -195,6 +239,7 @@ function fixture({ nvmrc = '22', extraFiles = {} } = {}) {
 function cli(root, args, input, env = {}) {
   const base = { ...process.env };
   delete base.CLAUDE_CODE_REMOTE;
+  delete base.FACTORY_SETUP_GATE;
   return spawnSync(process.execPath, [join(root, 'scripts', 'session-setup.mjs'), ...args], {
     input: JSON.stringify(input),
     encoding: 'utf8',
@@ -217,10 +262,15 @@ test('CLI: outside cloud sessions the hook and gate do nothing', () => {
   }
 });
 
-test('CLI: before setup has run, the gate blocks with exit 2', () => {
+test('CLI: with the guard on, the gate blocks with exit 2 before setup has run', () => {
   const root = fixture();
   try {
-    const g = cli(root, ['--gate'], { session_id: 's1' }, { CLAUDE_CODE_REMOTE: 'true' });
+    const g = cli(
+      root,
+      ['--gate'],
+      { session_id: 's1' },
+      { CLAUDE_CODE_REMOTE: 'true', FACTORY_SETUP_GATE: 'enforce' },
+    );
     assert.equal(g.status, 2);
     assert.match(g.stderr, /infrastructure failure/);
   } finally {
@@ -231,7 +281,12 @@ test('CLI: before setup has run, the gate blocks with exit 2', () => {
 test('CLI: cache-hit setup succeeds and unlocks the gate for this session only', () => {
   const root = fixture();
   try {
-    const h = cli(root, ['--hook'], { session_id: 's1', source: 'startup' }, { CLAUDE_CODE_REMOTE: 'true' });
+    const h = cli(
+      root,
+      ['--hook'],
+      { session_id: 's1', source: 'startup' },
+      { CLAUDE_CODE_REMOTE: 'true', FACTORY_SETUP_GATE: 'enforce' },
+    );
     assert.equal(h.status, 0, h.stderr);
     const out = JSON.parse(h.stdout);
     assert.match(out.hookSpecificOutput.additionalContext, /^Workspace setup succeeded \(cache hit\)/);
@@ -248,8 +303,24 @@ test('CLI: cache-hit setup succeeds and unlocks the gate for this session only',
         ['services', 'pass'],
       ],
     );
-    assert.equal(cli(root, ['--gate'], { session_id: 's1' }, { CLAUDE_CODE_REMOTE: 'true' }).status, 0);
-    assert.equal(cli(root, ['--gate'], { session_id: 's2' }, { CLAUDE_CODE_REMOTE: 'true' }).status, 2);
+    assert.equal(
+      cli(
+        root,
+        ['--gate'],
+        { session_id: 's1' },
+        { CLAUDE_CODE_REMOTE: 'true', FACTORY_SETUP_GATE: 'enforce' },
+      ).status,
+      0,
+    );
+    assert.equal(
+      cli(
+        root,
+        ['--gate'],
+        { session_id: 's2' },
+        { CLAUDE_CODE_REMOTE: 'true', FACTORY_SETUP_GATE: 'enforce' },
+      ).status,
+      2,
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -258,7 +329,7 @@ test('CLI: cache-hit setup succeeds and unlocks the gate for this session only',
 test('CLI: wrong Node version is an infrastructure failure that stops the session and blocks tools', () => {
   const root = fixture({ nvmrc: '18' });
   try {
-    const h = cli(root, ['--hook', '--force'], { session_id: 's1' });
+    const h = cli(root, ['--hook', '--force'], { session_id: 's1' }, { FACTORY_SETUP_GATE: 'enforce' });
     assert.equal(h.status, 0);
     const out = JSON.parse(h.stdout);
     assert.equal(out.continue, false);
@@ -268,7 +339,7 @@ test('CLI: wrong Node version is an infrastructure failure that stops the sessio
       /^INFRASTRUCTURE FAILURE: workspace setup failed at step "node"/,
     );
     assert.equal(readStatus(root).failedStep, 'node');
-    const g = cli(root, ['--gate', '--force'], { session_id: 's1' });
+    const g = cli(root, ['--gate', '--force'], { session_id: 's1' }, { FACTORY_SETUP_GATE: 'enforce' });
     assert.equal(g.status, 2);
     assert.match(g.stderr, /failed at step "node"/);
   } finally {
@@ -284,6 +355,25 @@ test('CLI: a tracked secret fails setup before anything is installed', () => {
     assert.equal(status.failedStep, 'secrets');
     assert.match(status.steps.at(-1).detail, /src\/config\.ts \(Anthropic API or OAuth token\)/);
     assert.doesNotMatch(h.stdout + JSON.stringify(status), new RegExp(FAKE_ANTHROPIC));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('CLI: with the guard off, a failed setup is reported but never stops or blocks the session', () => {
+  const root = fixture({ nvmrc: '18' });
+  try {
+    const h = cli(root, ['--hook'], { session_id: 's1' }, { CLAUDE_CODE_REMOTE: 'true' });
+    assert.equal(h.status, 0);
+    const out = JSON.parse(h.stdout);
+    assert.equal(out.continue, undefined);
+    assert.match(out.hookSpecificOutput.additionalContext, /^Workspace setup failed at step "node"/);
+    assert.match(out.hookSpecificOutput.additionalContext, /Setup guard: off/);
+    const status = readStatus(root);
+    assert.equal(status.failedStep, 'node');
+    assert.equal(status.gate.enforce, false);
+    assert.equal(cli(root, ['--gate'], { session_id: 's1' }, { CLAUDE_CODE_REMOTE: 'true' }).status, 0);
+    assert.equal(cli(root, ['--gate'], { session_id: 's2' }, { CLAUDE_CODE_REMOTE: 'true' }).status, 0);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -6,11 +6,14 @@
 //   node scripts/session-setup.mjs --hook      SessionStart hook (every session): reuse or
 //                                              reinstall dependencies, start per-session
 //                                              services, run readiness checks, record status
-//   node scripts/session-setup.mjs --gate      PreToolUse hook: block edits and shell commands
-//                                              unless this session's setup succeeded
+//   node scripts/session-setup.mjs --gate      PreToolUse hook: when the guard is on, block
+//                                              edits and shell commands unless this
+//                                              session's setup succeeded
 //
 // --hook and --gate do nothing outside cloud sessions (CLAUDE_CODE_REMOTE != "true"),
-// unless --force is given. Local fallback is out of scope here (ENG-154).
+// unless --force is given. The guard is on only when FACTORY_SETUP_GATE=enforce, which the
+// factory's cloud environment sets for worker sessions; other cloud sessions still run
+// setup and see its result, but are never blocked. Local fallback is out of scope (ENG-154).
 
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -20,6 +23,7 @@ import {
   STATUS_SCHEMA_VERSION,
   decideInstall,
   gateDecision,
+  gateMode,
   secretLikeContent,
   secretLikePaths,
   sessionContext,
@@ -207,6 +211,7 @@ async function hook() {
     schemaVersion: STATUS_SCHEMA_VERSION,
     sessionId: input.session_id ?? null,
     source: input.source ?? null,
+    gate: gateMode(process.env.FACTORY_SETUP_GATE),
     status: 'running',
     startedAt: new Date().toISOString(),
     steps: [],
@@ -229,7 +234,8 @@ async function hook() {
   const out = {
     hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: sessionContext(status) },
   };
-  if (status.status !== 'ok') {
+  // Only a worker session (guard on) is stopped; anyone else just sees the failure.
+  if (status.status !== 'ok' && status.gate.enforce) {
     out.continue = false;
     out.stopReason = `Infrastructure failure: workspace setup failed at "${status.failedStep}". The task was not started.`;
   }
@@ -240,8 +246,10 @@ async function hook() {
 function gate() {
   let d;
   try {
+    const { enforce } = gateMode(process.env.FACTORY_SETUP_GATE);
+    if (remote && !enforce) process.exit(0); // guard off: skip reading the status file
     const input = readInput();
-    d = gateDecision({ remote, status: readJson(STATUS_PATH), sessionId: input.session_id });
+    d = gateDecision({ remote, enforce, status: readJson(STATUS_PATH), sessionId: input.session_id });
   } catch (e) {
     // Any other exit code would let the tool call through, so an internal error blocks too.
     d = { allow: false, reason: `setup gate error: ${e.message}` };

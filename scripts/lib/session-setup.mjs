@@ -55,14 +55,32 @@ export function secretLikeContent(text) {
 }
 
 /**
+ * Is the guard on? It blocks tools only in factory worker sessions, where the factory's
+ * cloud environment sets FACTORY_SETUP_GATE=enforce. Unset, empty or "off" leaves it off,
+ * so people's own cloud sessions on this repo are never locked. Any other value is
+ * treated as "enforce" (fails closed), so a typo cannot silently turn the guard off.
+ * @param {string | undefined} value FACTORY_SETUP_GATE
+ * @returns {{ enforce: boolean, reason: string }}
+ */
+export function gateMode(value) {
+  const v = (value ?? '').trim();
+  if (v === '' || v === 'off')
+    return { enforce: false, reason: 'FACTORY_SETUP_GATE is not set to "enforce"' };
+  if (v === 'enforce') return { enforce: true, reason: 'FACTORY_SETUP_GATE=enforce' };
+  return { enforce: true, reason: `FACTORY_SETUP_GATE has an unknown value; treated as "enforce"` };
+}
+
+/**
  * Should a tool call go ahead? Used by the PreToolUse gate in cloud sessions.
- * Fails closed: no status, a status from another session, a setup still marked
- * running (the hook was killed by its timeout) or a failed setup all block.
- * @param {{ remote: boolean, status: any, sessionId: string | undefined }} input
+ * Only blocks when the guard is on (see gateMode). Then it fails closed: no status, a
+ * status from another session, a setup still marked running (the hook was killed by its
+ * timeout) or a failed setup all block.
+ * @param {{ remote: boolean, enforce: boolean, status: any, sessionId: string | undefined }} input
  * @returns {{ allow: boolean, reason: string }}
  */
-export function gateDecision({ remote, status, sessionId }) {
+export function gateDecision({ remote, enforce, status, sessionId }) {
   if (!remote) return { allow: true, reason: 'not a cloud session; gate is cloud-only' };
+  if (!enforce) return { allow: true, reason: 'guard is off in this session' };
   if (!status || typeof status !== 'object')
     return { allow: false, reason: 'workspace setup has not run in this session' };
   if (status.schemaVersion !== STATUS_SCHEMA_VERSION)
@@ -107,17 +125,31 @@ export async function waitForReady(probe, opts) {
   }
 }
 
-/** Text Claude sees at session start. A failure tells the worker to stop. */
+/**
+ * Text Claude sees at session start. With the guard on, a failure tells the worker to
+ * stop; with it off, the failure is reported but nothing is blocked.
+ */
 export function sessionContext(status) {
   const steps = (status.steps ?? [])
     .map((s) => `- ${s.name}: ${s.status}${s.detail ? ` (${s.detail})` : ''}`)
     .join('\n');
+  const guard = status.gate?.enforce
+    ? `Setup guard: on (${status.gate.reason}). Edits and shell commands are blocked unless setup succeeded.`
+    : 'Setup guard: off (FACTORY_SETUP_GATE is not "enforce"). Nothing is blocked.';
   if (status.status === 'ok')
-    return `Workspace setup succeeded (${status.install ?? 'install unknown'}).\n${steps}`;
+    return `Workspace setup succeeded (${status.install ?? 'install unknown'}).\n${guard}\n${steps}`;
+  if (!status.gate?.enforce)
+    return [
+      `Workspace setup failed at step "${status.failedStep}".`,
+      guard,
+      'Checks such as npm run check may not work until this is fixed.',
+      steps,
+    ].join('\n');
   return [
     `INFRASTRUCTURE FAILURE: workspace setup failed at step "${status.failedStep}".`,
     'Do not work on the task. File edits and shell commands are blocked in this session.',
     'End the attempt and report this as an infrastructure failure, not a task failure.',
+    guard,
     steps,
   ].join('\n');
 }
