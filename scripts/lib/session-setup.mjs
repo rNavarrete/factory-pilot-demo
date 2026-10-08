@@ -12,18 +12,22 @@ export function sha256(text) {
 /**
  * Decide whether installed dependencies can be reused.
  * The stamp is written into node_modules after a successful install, so a stale or
- * partial node_modules (lockfile changed, Node major changed, install interrupted)
- * never counts as a cache hit.
- * @param {{ stamp: any, lockSha256: string, nodeMajor: string }} input
+ * partial node_modules (lockfile or package.json changed, Node major changed, install
+ * interrupted) never counts as a cache hit. package.json is included because a branch can
+ * change its dependencies without updating the lockfile; only a real `npm ci` notices that
+ * the two disagree, so such a branch must go through one.
+ * @param {{ stamp: any, lockSha256: string, manifestSha256: string, nodeMajor: string }} input
  * @returns {{ action: 'reuse' | 'install', reason: string }}
  */
-export function decideInstall({ stamp, lockSha256, nodeMajor }) {
+export function decideInstall({ stamp, lockSha256, manifestSha256, nodeMajor }) {
   if (!stamp || typeof stamp !== 'object') return { action: 'install', reason: 'no install stamp' };
   if (stamp.lockSha256 !== lockSha256)
     return { action: 'install', reason: 'package-lock.json changed since last install' };
+  if (stamp.manifestSha256 !== manifestSha256)
+    return { action: 'install', reason: 'package.json changed since last install' };
   if (String(stamp.nodeMajor) !== String(nodeMajor))
     return { action: 'install', reason: `installed under Node ${stamp.nodeMajor}` };
-  return { action: 'reuse', reason: 'node_modules matches package-lock.json (cache hit)' };
+  return { action: 'reuse', reason: 'node_modules matches package.json and package-lock.json (cache hit)' };
 }
 
 // Files that should never be committed to this repo. `.env.example` is allowed because

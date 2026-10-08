@@ -127,8 +127,9 @@ function stepSecrets() {
 
 function stepDependencies() {
   const lockSha256 = sha256(readFileSync(join(ROOT, 'package-lock.json')));
+  const manifestSha256 = sha256(readFileSync(join(ROOT, 'package.json')));
   const nodeMajor = process.versions.node.split('.')[0];
-  const decision = decideInstall({ stamp: readJson(STAMP_PATH), lockSha256, nodeMajor });
+  const decision = decideInstall({ stamp: readJson(STAMP_PATH), lockSha256, manifestSha256, nodeMajor });
   if (decision.action === 'reuse') return { detail: decision.reason, install: 'cache hit' };
   const started = Date.now();
   // --ignore-scripts: same as CI, dependencies cannot run code during install.
@@ -140,10 +141,18 @@ function stepDependencies() {
     maxBuffer: 64 * 1024 * 1024,
   });
   if (r.error?.code === 'ETIMEDOUT') throw new Error(`npm ci timed out after ${INSTALL_TIMEOUT_MS / 1000} s`);
-  if (r.status !== 0) throw new Error(`npm ci exited ${r.status}: ${tail(r.stderr || r.stdout)}`);
+  if (r.status !== 0) {
+    // npm puts the reason first and its usage text after, so keep the start of the output.
+    const out = String(r.stderr || r.stdout || '').trim();
+    throw new Error(`npm ci exited ${r.status}: ${out.length > 400 ? `${out.slice(0, 400)}...` : out}`);
+  }
   writeFileSync(
     STAMP_PATH,
-    JSON.stringify({ lockSha256, nodeMajor, installedAt: new Date().toISOString() }, null, 2) + '\n',
+    JSON.stringify(
+      { lockSha256, manifestSha256, nodeMajor, installedAt: new Date().toISOString() },
+      null,
+      2,
+    ) + '\n',
   );
   const secs = ((Date.now() - started) / 1000).toFixed(1);
   return { detail: `npm ci in ${secs} s (${decision.reason})`, install: 'fresh install' };

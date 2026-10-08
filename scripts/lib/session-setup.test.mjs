@@ -28,6 +28,7 @@ import {
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const LOCK = 'f'.repeat(64);
+const MANIFEST = 'a'.repeat(64);
 // Built by concatenation so this file never contains a token-shaped string itself.
 const FAKE_ANTHROPIC = 'sk-' + 'ant-' + 'x'.repeat(40);
 const FAKE_GITHUB = 'gh' + 'p_' + 'A'.repeat(36);
@@ -35,14 +36,15 @@ const FAKE_GITHUB = 'gh' + 'p_' + 'A'.repeat(36);
 // ---- decideInstall ----
 
 test('install when there is no stamp (cold start)', () => {
-  const d = decideInstall({ stamp: null, lockSha256: LOCK, nodeMajor: '22' });
+  const d = decideInstall({ stamp: null, lockSha256: LOCK, manifestSha256: MANIFEST, nodeMajor: '22' });
   assert.equal(d.action, 'install');
 });
 
 test('reuse node_modules when the stamp matches the lockfile and Node major (cache hit)', () => {
   const d = decideInstall({
-    stamp: { lockSha256: LOCK, nodeMajor: '22' },
+    stamp: { lockSha256: LOCK, manifestSha256: MANIFEST, nodeMajor: '22' },
     lockSha256: LOCK,
+    manifestSha256: MANIFEST,
     nodeMajor: '22',
   });
   assert.equal(d.action, 'reuse');
@@ -50,18 +52,41 @@ test('reuse node_modules when the stamp matches the lockfile and Node major (cac
 
 test('reinstall when the lockfile changed after the cached install', () => {
   const d = decideInstall({
-    stamp: { lockSha256: 'e'.repeat(64), nodeMajor: '22' },
+    stamp: { lockSha256: 'e'.repeat(64), manifestSha256: MANIFEST, nodeMajor: '22' },
     lockSha256: LOCK,
+    manifestSha256: MANIFEST,
     nodeMajor: '22',
   });
   assert.equal(d.action, 'install');
   assert.match(d.reason, /package-lock\.json changed/);
 });
 
+test('reinstall when package.json changed but the lockfile did not', () => {
+  const d = decideInstall({
+    stamp: { lockSha256: LOCK, manifestSha256: 'e'.repeat(64), nodeMajor: '22' },
+    lockSha256: LOCK,
+    manifestSha256: MANIFEST,
+    nodeMajor: '22',
+  });
+  assert.equal(d.action, 'install');
+  assert.match(d.reason, /package\.json changed/);
+});
+
+test('a stamp from before package.json was recorded is not a cache hit', () => {
+  const d = decideInstall({
+    stamp: { lockSha256: LOCK, nodeMajor: '22' },
+    lockSha256: LOCK,
+    manifestSha256: MANIFEST,
+    nodeMajor: '22',
+  });
+  assert.equal(d.action, 'install');
+});
+
 test('reinstall when the Node major changed', () => {
   const d = decideInstall({
-    stamp: { lockSha256: LOCK, nodeMajor: '20' },
+    stamp: { lockSha256: LOCK, manifestSha256: MANIFEST, nodeMajor: '20' },
     lockSha256: LOCK,
+    manifestSha256: MANIFEST,
     nodeMajor: '22',
   });
   assert.equal(d.action, 'install');
@@ -212,6 +237,7 @@ function fixture({ nvmrc = '22', extraFiles = {} } = {}) {
     join(root, 'scripts', 'lib', 'session-setup.mjs'),
   );
   copyFileSync(join(REPO, 'package-lock.json'), join(root, 'package-lock.json'));
+  copyFileSync(join(REPO, 'package.json'), join(root, 'package.json'));
   writeFileSync(join(root, '.nvmrc'), `${nvmrc}\n`);
   for (const [p, text] of Object.entries(extraFiles)) {
     mkdirSync(dirname(join(root, p)), { recursive: true });
@@ -228,6 +254,7 @@ function fixture({ nvmrc = '22', extraFiles = {} } = {}) {
     join(root, 'node_modules', '.factory-setup-stamp.json'),
     JSON.stringify({
       lockSha256: sha256(readFileSync(join(root, 'package-lock.json'))),
+      manifestSha256: sha256(readFileSync(join(root, 'package.json'))),
       nodeMajor: process.versions.node.split('.')[0],
     }),
   );
@@ -425,6 +452,25 @@ test('CLI: after a context compaction, a good setup from this session is kept, n
     // A compaction in a different session is a fresh start and runs setup again.
     cli(root, ['--hook'], { session_id: 's2', source: 'compact' }, env);
     assert.equal(readStatus(root).sessionId, 's2');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('CLI: package.json changed without its lockfile is not a cache hit; npm ci rejects it and the worker is blocked', () => {
+  const root = fixture();
+  const env = { CLAUDE_CODE_REMOTE: 'true', FACTORY_SETUP_GATE: 'enforce', npm_config_offline: 'true' };
+  try {
+    const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+    manifest.devDependencies['left-pad'] = '^1.3.0';
+    writeFileSync(join(root, 'package.json'), JSON.stringify(manifest, null, 2) + '\n');
+    const h = cli(root, ['--hook'], { session_id: 's1' }, env);
+    assert.equal(h.status, 0, h.stderr);
+    assert.equal(JSON.parse(h.stdout).continue, false);
+    const status = readStatus(root);
+    assert.equal(status.failedStep, 'dependencies');
+    assert.match(status.steps.at(-1).detail, /npm ci exited \d+: .*in sync/s);
+    assert.equal(cli(root, ['--gate'], { session_id: 's1' }, env).status, 2);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

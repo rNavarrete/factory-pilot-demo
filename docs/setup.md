@@ -39,7 +39,7 @@ string (Anthropic, GitHub, npm, AWS, private keys). It names the file and the ki
 1. **Environment setup script** (once per cached snapshot). Installs dependencies and checks the tools run. Its
    result is cached with the environment.
 2. **Session start hook** (every session, `--hook`). Checks Node, scans for secrets, reuses `node_modules` if it
-   matches the lockfile and Node version (otherwise reinstalls), checks that TypeScript, Vitest, Vite, ESLint,
+   matches `package.json`, the lockfile and the Node version (otherwise reinstalls), checks that TypeScript, Vitest, Vite, ESLint,
    Prettier and jsdom actually run, and starts services. It writes the result to `.factory/setup-status.json` and
    tells Claude the outcome and whether the guard is on. After a context compaction it keeps the same session's
    good result instead of running setup again.
@@ -47,8 +47,8 @@ string (Anthropic, GitHub, npm, AWS, private keys). It names the file and the ki
    such as GitHub. Only when the guard is on: blocks the call unless setup succeeded in this same session.
    Read-only built-in tools (reading and searching files) stay allowed so the worker can report what happened.
 
-`node_modules/.factory-setup-stamp.json` records the lockfile hash and Node version of the last good install. A
-changed lockfile, a different Node major or an interrupted install all mean no stamp match, so a reinstall.
+`node_modules/.factory-setup-stamp.json` records the `package.json` and lockfile hashes and the Node version of the
+last good install. A changed `package.json` or lockfile, a different Node major or an interrupted install all mean no stamp match, so a reinstall.
 
 ## The setup guard
 
@@ -103,6 +103,7 @@ Clean clones on a cloud session, Node 22.22, npm 10.9 (`scripts/session-setup.mj
 | Cache build: environment setup script on a fresh clone   | Install plus tool checks                    | 3.2 to 3.5 s |
 | Cache hit: new session on the cached snapshot            | Reused, guard unlocks for that session only | 0.9 s        |
 | Stale lockfile: lockfile changed after the snapshot      | Detected, reinstalled                       | 2.7 to 3.4 s |
+| `package.json` changed, lockfile not updated            | No cache hit; `npm ci` refuses; worker blocked | about 1 s |
 | Re-clone with a warm npm cache                           | Fresh install from cache                    | 2.4 to 2.7 s |
 | Registry unreachable, empty cache                        | Fails at "dependencies"; worker blocked     | about 71 s   |
 | Hook killed mid-install                                  | Status stays "running"; worker blocked      | n/a          |
