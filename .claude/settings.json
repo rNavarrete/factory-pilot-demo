@@ -13,7 +13,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Bash|Monitor|PowerShell|Edit|Write|MultiEdit|NotebookEdit",
+        "matcher": "Bash|Monitor|PowerShell|Edit|Write|MultiEdit|NotebookEdit|Agent|Task|mcp__.*",
         "hooks": [
           {
             "type": "command",

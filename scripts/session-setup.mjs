@@ -19,7 +19,18 @@ import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import {
+
+// Loaded dynamically so the gate can still block if the helper file is missing or broken:
+// a failed static import would exit 1, which Claude Code treats as "let the call through".
+let lib;
+let libError;
+try {
+  lib = await import('./lib/session-setup.mjs');
+} catch (e) {
+  libError = e;
+}
+if (libError && !process.argv.includes('--gate')) throw libError;
+const {
   STATUS_SCHEMA_VERSION,
   decideInstall,
   gateDecision,
@@ -29,12 +40,14 @@ import {
   sessionContext,
   sha256,
   waitForReady,
-} from './lib/session-setup.mjs';
+} = lib ?? {};
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const STATUS_PATH = join(ROOT, '.factory', 'setup-status.json');
 const STAMP_PATH = join(ROOT, 'node_modules', '.factory-setup-stamp.json');
-const INSTALL_TIMEOUT_MS = 240_000; // the hook entry in .claude/settings.json allows 300 s
+// The hook entry in .claude/settings.json allows 300 s. If the steps together run longer, the
+// hook is killed, its status stays "running" and the gate blocks (fails closed).
+const INSTALL_TIMEOUT_MS = 240_000;
 const TOOL_TIMEOUT_MS = 30_000;
 const NPM = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 
@@ -207,6 +220,16 @@ async function prepare() {
 async function hook() {
   if (!remote) process.exit(0);
   const input = readInput();
+  // After a context compaction the workspace is unchanged; keep this session's good result
+  // instead of re-running setup and risking a transient failure in a working session.
+  const previous = readJson(STATUS_PATH);
+  if (input.source === 'compact' && previous?.status === 'ok' && previous.sessionId === input.session_id) {
+    const out = {
+      hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: sessionContext(previous) },
+    };
+    process.stdout.write(JSON.stringify(out) + '\n');
+    process.exit(0);
+  }
   const status = {
     schemaVersion: STATUS_SCHEMA_VERSION,
     sessionId: input.session_id ?? null,
@@ -246,6 +269,12 @@ async function hook() {
 function gate() {
   let d;
   try {
+    if (libError) {
+      // Same rule as gateMode, inlined because the helpers failed to load.
+      const v = (process.env.FACTORY_SETUP_GATE ?? '').trim();
+      if (!remote || v === '' || v === 'off') process.exit(0);
+      throw libError;
+    }
     const { enforce } = gateMode(process.env.FACTORY_SETUP_GATE);
     if (remote && !enforce) process.exit(0); // guard off: skip reading the status file
     const input = readInput();

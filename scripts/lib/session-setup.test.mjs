@@ -110,7 +110,7 @@ test('guard is on only for FACTORY_SETUP_GATE=enforce; unknown values fail close
   assert.equal(gateMode('off').enforce, false);
   assert.equal(gateMode('enforce').enforce, true);
   assert.equal(gateMode(' enforce\n').enforce, true);
-  assert.equal(gateMode('Enforce').enforce, true);
+  assert.equal(gateMode('Enforce').enforce, true); // not a known value, so fails closed
   assert.match(gateMode('yes').reason, /unknown value/);
 });
 
@@ -374,6 +374,57 @@ test('CLI: with the guard off, a failed setup is reported but never stops or blo
     assert.equal(status.gate.enforce, false);
     assert.equal(cli(root, ['--gate'], { session_id: 's1' }, { CLAUDE_CODE_REMOTE: 'true' }).status, 0);
     assert.equal(cli(root, ['--gate'], { session_id: 's2' }, { CLAUDE_CODE_REMOTE: 'true' }).status, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('CLI: an unknown FACTORY_SETUP_GATE value blocks like "enforce"', () => {
+  const root = fixture();
+  try {
+    const g = cli(
+      root,
+      ['--gate'],
+      { session_id: 's1' },
+      { CLAUDE_CODE_REMOTE: 'true', FACTORY_SETUP_GATE: 'yes' },
+    );
+    assert.equal(g.status, 2);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('CLI: if the helper file cannot load, the gate blocks with the guard on and allows with it off', () => {
+  const root = fixture();
+  try {
+    rmSync(join(root, 'scripts', 'lib', 'session-setup.mjs'));
+    const on = cli(
+      root,
+      ['--gate'],
+      { session_id: 's1' },
+      { CLAUDE_CODE_REMOTE: 'true', FACTORY_SETUP_GATE: 'enforce' },
+    );
+    assert.equal(on.status, 2);
+    assert.match(on.stderr, /setup gate error/);
+    assert.equal(cli(root, ['--gate'], { session_id: 's1' }, { CLAUDE_CODE_REMOTE: 'true' }).status, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('CLI: after a context compaction, a good setup from this session is kept, not re-run', () => {
+  const root = fixture();
+  const env = { CLAUDE_CODE_REMOTE: 'true', FACTORY_SETUP_GATE: 'enforce' };
+  try {
+    assert.equal(cli(root, ['--hook'], { session_id: 's1', source: 'startup' }, env).status, 0);
+    const before = readFileSync(join(root, '.factory', 'setup-status.json'), 'utf8');
+    const h = cli(root, ['--hook'], { session_id: 's1', source: 'compact' }, env);
+    assert.equal(h.status, 0);
+    assert.match(JSON.parse(h.stdout).hookSpecificOutput.additionalContext, /^Workspace setup succeeded/);
+    assert.equal(readFileSync(join(root, '.factory', 'setup-status.json'), 'utf8'), before);
+    // A compaction in a different session is a fresh start and runs setup again.
+    cli(root, ['--hook'], { session_id: 's2', source: 'compact' }, env);
+    assert.equal(readStatus(root).sessionId, 's2');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

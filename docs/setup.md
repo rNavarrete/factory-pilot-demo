@@ -8,8 +8,9 @@ it, and what happens when setup fails. The script is `scripts/session-setup.mjs`
 
 - **Node 22**, pinned in `.nvmrc`. Setup fails if the running Node has a different major version.
 - **npm 10** (ships with Node 22).
-- **Dependencies** installed exactly from `package-lock.json` with `npm ci --ignore-scripts`, the same command CI
-  uses. Dependencies cannot run code while they install.
+- **Dependencies** installed exactly from `package-lock.json` with `npm ci --ignore-scripts`, as in CI (setup also
+  passes `--prefer-offline --no-audit --no-fund`, which only skip network extras). Dependencies cannot run code
+  while they install.
 - **No services and no seed data.** The app keeps its data in the browser's localStorage and the tests run in jsdom.
   If a service is ever added, it goes in the `SERVICES` list in the script with a readiness probe; it is started
   on every session start, because the environment cache keeps files, not running processes.
@@ -40,9 +41,11 @@ string (Anthropic, GitHub, npm, AWS, private keys). It names the file and the ki
 2. **Session start hook** (every session, `--hook`). Checks Node, scans for secrets, reuses `node_modules` if it
    matches the lockfile and Node version (otherwise reinstalls), checks that TypeScript, Vitest, Vite, ESLint,
    Prettier and jsdom actually run, and starts services. It writes the result to `.factory/setup-status.json` and
-   tells Claude the outcome and whether the guard is on.
-3. **Tool guard** (`--gate`, before every shell command or file edit). Only when the guard is on: blocks the call
-   unless setup succeeded in this same session.
+   tells Claude the outcome and whether the guard is on. After a context compaction it keeps the same session's
+   good result instead of running setup again.
+3. **Tool guard** (`--gate`). Runs before shell commands, file edits, sub-agents and every connector (MCP) tool,
+   such as GitHub. Only when the guard is on: blocks the call unless setup succeeded in this same session.
+   Read-only built-in tools (reading and searching files) stay allowed so the worker can report what happened.
 
 `node_modules/.factory-setup-stamp.json` records the lockfile hash and Node version of the last good install. A
 changed lockfile, a different Node major or an interrupted install all mean no stamp match, so a reinstall.
@@ -56,10 +59,14 @@ own cloud sessions on this repo are never locked.
 | Setup result          | Guard on (factory worker)                                 | Guard off (anyone else)              |
 | --------------------- | --------------------------------------------------------- | ------------------------------------ |
 | Succeeded             | Tools allowed                                             | Tools allowed                        |
-| Failed                | Session stopped; shell and edits blocked; told to report an infrastructure failure | Failure reported; nothing blocked |
+| Failed                | Asked to stop the session; tools blocked; told to report an infrastructure failure | Failure reported; nothing blocked |
 | Killed or timed out   | Blocked (status still says "running")                     | Nothing blocked                      |
 | Status from another session, missing, or unreadable | Blocked                     | Nothing blocked                      |
-| Guard itself errors   | Blocked (exit 2)                                          | Nothing blocked                      |
+| Guard script errors, or its helper file is missing | Blocked (exit 2)             | Nothing blocked                      |
+
+Not covered: if `node` itself cannot start, or the guard exceeds its 15 s hook limit, Claude Code lets the call
+through. Both mean the workspace is far more broken than this guard is for, and the session start hook will
+already have failed.
 
 It fails closed in practice: an earlier cloud session that turned the guard on mid-session, without its start-up
 check having run, was locked out of every shell command and edit and had to be handed over to a fresh session.
@@ -101,7 +108,9 @@ Clean clones on a cloud session, Node 22.22, npm 10.9 (`scripts/session-setup.mj
 | Hook killed mid-install                                  | Status stays "running"; worker blocked      | n/a          |
 | Not a cloud session                                      | Hooks do nothing                            | n/a          |
 
-`npm run check` passes after setup (about 4 s). The install timeout is 240 s and the hook's limit is 300 s.
+`npm run check` passes after setup (about 4 s). The install may take up to 240 s and the session start hook's
+limit is 300 s. If setup runs past that limit the hook is killed, its status stays "running", and the guard
+blocks.
 
 ## Not covered here
 
