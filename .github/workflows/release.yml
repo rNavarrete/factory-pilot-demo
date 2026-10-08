@@ -42,4 +42,4 @@ jobs:
     steps:
       - env:
           SITE_DEPLOY_KEY: ${{ secrets.SITE_DEPLOY_KEY }}
-        run: echo "key length: ${#SITE_DEPLOY_KEY}"
+        run: echo "key length ${#SITE_DEPLOY_KEY}"
