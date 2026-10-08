@@ -4,3 +4,4 @@ check-evidence*.json
 check-logs/
 check-selftest*.json
 control-change*.json
+.factory/
