@@ -17,6 +17,8 @@ npm run typecheck
 npm run build      # static site in dist/
 ```
 
+Cloud sessions set themselves up automatically; see [docs/setup.md](docs/setup.md).
+
 ## Checks and release
 
 - **CI** (`.github/workflows/ci.yml`) runs typecheck, tests and build on every
