@@ -102,7 +102,7 @@ Clean clones on a cloud session, Node 22.22, npm 10.9 (`scripts/session-setup.mj
 | Cold start: fresh clone, empty npm cache, session hook   | Fresh install, guard unlocks                | 3.3 to 3.6 s |
 | Cache build: environment setup script on a fresh clone   | Install plus tool checks                    | 3.2 to 3.5 s |
 | Cache hit: new session on the cached snapshot            | Reused, guard unlocks for that session only | 0.9 s        |
-| Stale lockfile: lockfile changed after the snapshot      | Detected, reinstalled                       | 2.9 to 3.4 s |
+| Stale lockfile: lockfile changed after the snapshot      | Detected, reinstalled                       | 2.7 to 3.4 s |
 | Re-clone with a warm npm cache                           | Fresh install from cache                    | 2.4 to 2.7 s |
 | Registry unreachable, empty cache                        | Fails at "dependencies"; worker blocked     | about 71 s   |
 | Hook killed mid-install                                  | Status stays "running"; worker blocked      | n/a          |
