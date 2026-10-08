@@ -1,9 +1,12 @@
-# Release to GitHub Pages. Started by hand only; never on merge.
-# The github-pages environment's required reviewer (Rolando) is the
-# release authorization gate (ENG-142). Each run releases exactly one commit:
-# the one it was started on. That commit must be on main and must already have
-# passed CI's `verified` check from GitHub Actions; a different commit needs a new
-# run and a new approval.
+# Release the site. Started by hand only; never on merge.
+# The site lives in a separate repo, rNavarrete/factory-pilot-demo-site, that the factory bot
+# cannot reach. Only the deploy job can write to it, using a deploy key stored as a secret of the
+# `release` environment, which needs Rolando's approval and allows main only. So a workflow edited
+# on another branch cannot publish (ENG-143: Pages in this repo let any workflow publish).
+# Release authorization gate: the `release` environment's required reviewer (Rolando).
+# Each run releases exactly one commit: the one it was started on. That commit must be on
+# main and must already have passed CI's `verified` check from GitHub Actions; a different
+# commit needs a new run and a new approval.
 name: Release
 
 on:
@@ -57,7 +60,7 @@ jobs:
           {
             echo "### Releasing commit \`$SHA\`"
             echo ""
-            echo "Approving the github-pages deployment releases exactly this commit."
+            echo "Approving the release deployment publishes exactly this commit."
           } >> "$GITHUB_STEP_SUMMARY"
 
   build:
@@ -76,19 +79,50 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run build
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-artifact@v4
         with:
+          name: site-${{ github.sha }}
           path: dist
+          if-no-files-found: error
 
   deploy:
     needs: build
     runs-on: ubuntu-latest
-    permissions:
-      pages: write
-      id-token: write
+    permissions: {}
     environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      name: release
+      url: https://rnavarrete.github.io/factory-pilot-demo-site/
+    env:
+      SHA: ${{ github.sha }}
     steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: site-${{ github.sha }}
+          path: dist
+      - name: Publish this exact build to the site repo
+        env:
+          # Environment secret of `release` only (never a repository secret, which every
+          # workflow could read). Write deploy key on rNavarrete/factory-pilot-demo-site.
+          SITE_DEPLOY_KEY: ${{ secrets.SITE_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$SITE_DEPLOY_KEY" ]; then echo "::error::SITE_DEPLOY_KEY missing from the release environment"; exit 1; fi
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SITE_DEPLOY_KEY" > ~/.ssh/site_key
+          chmod 600 ~/.ssh/site_key
+          # GitHub's published SSH host key, pinned (no trust-on-first-use).
+          echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > ~/.ssh/known_hosts
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/site_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
+          git clone --depth 1 git@github.com:rNavarrete/factory-pilot-demo-site.git site
+          find site -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          cp -R dist/. site/
+          touch site/.nojekyll
+          echo "$SHA" > site/RELEASED_COMMIT
+          cd site
+          git config user.name "factory-pilot-demo release"
+          git config user.email "release@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then echo "site already at $SHA"; exit 0; fi
+          git commit -m "Release $SHA from rNavarrete/factory-pilot-demo"
+          git push origin HEAD:main
+          echo "### Published commit \`$SHA\` to https://rnavarrete.github.io/factory-pilot-demo-site/" >> "$GITHUB_STEP_SUMMARY"
