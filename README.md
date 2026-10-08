@@ -23,6 +23,9 @@ Cloud sessions set themselves up automatically; see [docs/setup.md](docs/setup.m
 
 - **CI** (`.github/workflows/ci.yml`) runs typecheck, tests and build on every
   pull request and on main.
-- **Release** (`.github/workflows/release.yml`) deploys `dist/` to GitHub Pages.
-  It only runs when started by hand, and the `github-pages` environment needs
-  Rolando's approval before it deploys. Merging never deploys.
+- **Release** (`.github/workflows/release.yml`) publishes `dist/` to the separate
+  site repo `rNavarrete/factory-pilot-demo-site`, served at
+  https://rnavarrete.github.io/factory-pilot-demo-site/. It only runs when started
+  by hand, and the `release` environment needs Rolando's approval before it
+  publishes. Only that environment holds the key to the site repo. Merging never
+  deploys.
