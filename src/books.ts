@@ -37,6 +37,10 @@ export function removeBook(books: Book[], id: string): Book[] {
   return books.filter((b) => b.id !== id);
 }
 
+export function removeFinished(books: Book[]): Book[] {
+  return books.filter((b) => b.status !== 'done');
+}
+
 export function formatDate(iso: string): string {
   const d = new Date(iso);
   const mm = String(d.getMonth()).padStart(2, '0');
