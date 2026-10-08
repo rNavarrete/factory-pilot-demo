@@ -33,6 +33,16 @@ export function setStatus(books: Book[], id: string, status: Status, now = new D
   });
 }
 
+export function renameBook(books: Book[], id: string, title: string, author: string): Book[] {
+  if (!title || !author) {
+    throw new Error('Title and author are required');
+  }
+  if (!books.some((b) => b.id === id)) {
+    throw new Error(`No book with id ${id}`);
+  }
+  return books.map((b) => (b.id === id ? { ...b, title, author } : b));
+}
+
 export function removeBook(books: Book[], id: string): Book[] {
   return books.filter((b) => b.id !== id);
 }
