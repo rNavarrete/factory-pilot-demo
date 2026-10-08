@@ -32,3 +32,14 @@ jobs:
       id-token: write
     steps:
       - uses: actions/deploy-pages@v4
+
+  # Re-test after the fix: a branch job asking for the `release` environment (which holds the
+  # site key) must be refused by the environment's main-only rule. Prints only the key's length.
+  ask-for-release-key:
+    runs-on: ubuntu-latest
+    environment:
+      name: release
+    steps:
+      - env:
+          SITE_DEPLOY_KEY: ${{ secrets.SITE_DEPLOY_KEY }}
+        run: echo "key length: ${#SITE_DEPLOY_KEY}"
