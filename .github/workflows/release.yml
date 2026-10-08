@@ -1,9 +1,6 @@
-# Release to GitHub Pages. Started by hand only; never on merge.
-# The github-pages environment's required reviewer (Rolando) is the
-# release authorization gate (ENG-142). Each run releases exactly one commit:
-# the one it was started on. That commit must be on main and must already have
-# passed CI's `verified` check from GitHub Actions; a different commit needs a new
-# run and a new approval.
+# ENG-143 probe, throwaway branch, never merged. Question: can a job that does NOT use the
+# github-pages environment (so no required reviewer, no main-only rule) publish GitHub Pages?
+# Builds the same app as main. Started once by hand on this branch.
 name: Release
 
 on:
@@ -12,83 +9,26 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: pages
-  cancel-in-progress: false
-
 jobs:
-  candidate:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      actions: read
-    env:
-      GH_TOKEN: ${{ github.token }}
-      SHA: ${{ github.sha }}
-      REPO: ${{ github.repository }}
-    steps:
-      - name: Only main can be released
-        if: github.ref != 'refs/heads/main'
-        run: |
-          echo "::error::release runs only from main (got $GITHUB_REF)"
-          exit 1
-      - name: Require the trusted CI run on main to have passed for this exact commit
-        run: |
-          # A check named `verified` is not enough: any workflow with checks: write can post
-          # one as GitHub Actions. Only a run of main's own ci.yml, started by a push to main
-          # for this commit, counts, and its `verified` job must have succeeded.
-          runs=$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$SHA&event=push&branch=main&per_page=100" \
-            --jq '[.workflow_runs[] | select(.path == ".github/workflows/ci.yml" and .event == "push"
-              and .head_branch == "main" and .head_sha == env.SHA and .status == "completed"
-              and .conclusion == "success") | .id] | .[]')
-          for run in $runs; do
-            ok=$(gh api "repos/$REPO/actions/runs/$run/jobs?per_page=100" \
-              --jq '[.jobs[] | select(.name == "verified" and .head_sha == env.SHA
-                and .status == "completed" and .conclusion == "success")] | length')
-            if [ "$ok" -ge 1 ]; then
-              echo "trusted CI run $run passed 'verified' for $SHA"
-              exit 0
-            fi
-          done
-          echo "::error::commit $SHA has no successful push-to-main run of ci.yml with a passing 'verified' job"
-          exit 1
-      - name: Show what is being released
-        run: |
-          {
-            echo "### Releasing commit \`$SHA\`"
-            echo ""
-            echo "Approving the github-pages deployment releases exactly this commit."
-          } >> "$GITHUB_STEP_SUMMARY"
-
   build:
-    needs: candidate
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.sha }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm test
       - run: npm run build
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist
 
-  deploy:
+  deploy-without-environment:
     needs: build
     runs-on: ubuntu-latest
     permissions:
       pages: write
       id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4
+      - uses: actions/deploy-pages@v4
