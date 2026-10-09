@@ -57,3 +57,11 @@ export function formatDate(iso: string): string {
   const dd = String(d.getDate()).padStart(2, '0');
   return `${d.getFullYear()}-${mm}-${dd}`;
 }
+
+export function bookCountLabel(count: number): string {
+  if (!Number.isInteger(count) || count < 0) {
+    throw new Error(`Invalid book count: ${count}`);
+  }
+  if (count === 0) return 'No books yet';
+  return count === 1 ? '1 book' : `${count} books`;
+}
