@@ -1,5 +1,6 @@
 import {
   addBook,
+  bookCountLabel,
   formatDate,
   removeBook,
   removeFinished,
@@ -25,7 +26,7 @@ function update(next: Book[]): void {
 }
 
 function render(): void {
-  summary.textContent = `${books.length} book${books.length === 1 ? '' : 's'}`;
+  summary.textContent = bookCountLabel(books.length);
   clearFinished.disabled = !books.some((b) => b.status === 'done');
   list.replaceChildren(
     ...books.map((book) => {
