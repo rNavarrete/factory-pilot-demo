@@ -17,6 +17,12 @@ npm run typecheck
 npm run build      # static site in dist/
 ```
 
+To run one test file, pass its path to `npm test`:
+
+```bash
+npm test -- tests/books.test.ts
+```
+
 Cloud sessions set themselves up automatically; see [docs/setup.md](docs/setup.md).
 
 ## Before you push
