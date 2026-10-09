@@ -13,6 +13,15 @@ export default tseslint.config(
       sourceType: 'module',
       globals: { ...globals.browser },
     },
+    rules: {
+      // CLAUDE.md: never put user data into HTML; build nodes and use textContent.
+      'no-restricted-properties': [
+        'error',
+        { property: 'innerHTML', message: 'Use textContent or DOM nodes instead.' },
+        { property: 'outerHTML', message: 'Use textContent or DOM nodes instead.' },
+        { property: 'insertAdjacentHTML', message: 'Use textContent or DOM nodes instead.' },
+      ],
+    },
   },
   {
     files: ['scripts/**/*.{js,mjs}', '*.config.{js,ts}'],

@@ -34,7 +34,7 @@ This file stands alone. Do not rely on user-level `~/.claude` settings, plugins,
 - TypeScript strict mode.
 - Use pure functions that return new arrays. Never mutate their inputs.
 - Time-dependent code takes a `now` parameter so tests stay deterministic.
-- Never assign user data to `innerHTML`; use `textContent`.
+- Never assign user data to `innerHTML`; use `textContent`. Lint blocks `innerHTML`, `outerHTML` and `insertAdjacentHTML`.
 - Add no new runtime dependencies unless the contract allows them.
 - Keep commits small and focused.
 
@@ -58,7 +58,7 @@ Changing any of these is a **control change**. The verifier flags control change
 - `CLAUDE.md` and `.claude/`.
 - Existing test assertions. Never delete or weaken an assertion to make a test pass. Add new tests instead.
 
-Release controls: `release.yml` runs only when started by hand (`workflow_dispatch`), and the `github-pages` environment needs Rolando's approval. Merging never deploys.
+Release controls: `release.yml` runs only when started by hand (`workflow_dispatch`), and the `release` environment needs Rolando's approval before it publishes to the separate site repo. Merging never deploys.
 
 ## Never do
 

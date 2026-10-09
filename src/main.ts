@@ -34,7 +34,6 @@ function render(): void {
 
       const meta = document.createElement('span');
       meta.className = 'meta';
-      meta.innerHTML = '';
       const strong = document.createElement('strong');
       strong.textContent = book.title;
       const small = document.createElement('small');
